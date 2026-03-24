@@ -1,0 +1,44 @@
+EADrift/
+|-- .gitignore
+|-- LICENSE
+|-- README.module
+|-- System_overview.txt
+|-- package-lock.json
+|-- package.json
+`-- src/
+    |-- bot/
+    |   |-- commands.js
+    |   |-- confirmation.js
+    |   `-- telegram.js
+    |-- config/
+    |   `-- app.config.js
+    |-- core/
+    |   |-- positionMonitor.js
+    |   |-- riskEngine.js
+    |   `-- tradingMode.js
+    |-- data/
+    |   `-- trading.db
+    |-- exchanges/
+    |   `-- binance.js
+    |-- module/
+    |   |-- db/
+    |   |   |-- analytics.js
+    |   |   |-- database.js
+    |   |   |-- tradeRepository.js
+    |   |   `-- models/
+    |   |       |-- Signal.js
+    |   |       |-- SlHistory.js
+    |   |       |-- Trade.js
+    |   |       `-- TradeEvent.js
+    |   `-- telegram/
+    |       `-- TelegramClient.js
+    |-- parser/
+    |   `-- signalParser.js
+    |-- shared/
+    |   |-- logger.js
+    |   |-- message.js
+    |   `-- utils.js
+    |-- sources/
+    |   `-- telegram/
+    |       `-- TelegramSourceListener.js
+    `-- index.js

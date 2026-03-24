@@ -1,0 +1,378 @@
+TRADING BOT — SYSTEM OVERVIEW
+==============================
+
+СТЕК
+----
+Node.js ESM, Binance Futures API (fapi), Telegram Bot API (node-telegram-bot-api),
+gramjs (MTProto для читання каналу), axios для HTTP.
+SQLite + Sequelize (персистентність угод, сигналів, подій).
+
+
+СТРУКТУРА ФАЙЛІВ
+-----------------
+EADrift/
+|-- .gitignore
+|-- LICENSE
+|-- README.module
+|-- System_overview.txt
+|-- package-lock.json
+|-- package.json
+`-- src/
+    |-- bot/
+    |   |-- commands.js
+    |   |-- confirmation.js
+    |   `-- telegram.js
+    |-- config/
+    |   `-- app.config.js
+    |-- core/
+    |   |-- positionMonitor.js
+    |   |-- riskEngine.js
+    |   `-- tradingMode.js
+    |-- data/
+    |   `-- trading.db
+    |-- exchanges/
+    |   `-- binance.js
+    |-- module/
+    |   |-- db/
+    |   |   |-- analytics.js
+    |   |   |-- database.js
+    |   |   |-- tradeRepository.js
+    |   |   `-- models/
+    |   |       |-- Signal.js
+    |   |       |-- SlHistory.js
+    |   |       |-- Trade.js
+    |   |       `-- TradeEvent.js
+    |   `-- telegram/
+    |       `-- TelegramClient.js
+    |-- parser/
+    |   `-- signalParser.js
+    |-- shared/
+    |   |-- logger.js
+    |   |-- message.js
+    |   `-- utils.js
+    |-- sources/
+    |   `-- telegram/
+    |       `-- TelegramSourceListener.js
+    `-- index.js
+
+
+ПОТІК СИГНАЛУ
+-------------
+1. TelegramSourceListener отримує повідомлення з каналу (MTProto NewMessage event
+   + fallback ping кожні 4 хв щоб Telegram не переставав слати Updates для великих каналів)
+
+2. signalParser.js парсить текст:
+   SIGNAL → { symbol, side, entryLow, entryHigh, entryMid, tpPrices,
+               slPrice, timeframe, signalId, accuracy, rawText, trendLine }
+   REPORT → { symbol, side, signalId, rawText }
+   інше   → null
+
+3. index.js передає SIGNAL в requestConfirmation() з повним набором полів:
+   symbol, side (BUY/SELL), entryType=LIMIT, entryPrice=entryMid,
+   entryLow, entryHigh, slPrice, tpPrices, interval=timeframe,
+   signalId, accuracy, rawText (для saveSignal в БД)
+
+4. confirmation.js — головна логіка вирішення:
+
+   a. PAUSED → saveSignal() + updateSignalStatus(PAUSED) → ігнорувати, повідомити адміна
+
+   b. saveSignal() зберігає сигнал в БД одразу (до валідації),
+      статус PENDING → оновлюється в кінці кожної гілки
+
+   c. getMarkPrice() + validateMarketEntry():
+        ціна в зоні [entryLow, entryHigh]
+          → entryType залишається LIMIT
+        ціна поза зоною але slippage ≤ 2% і R:R до TP1 ≥ 1.5
+          → entryType = MARKET, entryPrice = currentPrice
+        SL hit / TP1 hit / slippage > 2% / R:R < 1.5
+          → updateSignalStatus(REJECTED) → не торгувати, повідомити адміна
+
+   d. calcFromBalance() → riskEngine рахує quantity і leverage від балансу і SL
+      (quantity не передається з index.js — завжди авторозрахунок)
+
+   e. Якщо riskEngine → REJECT → updateSignalStatus(REJECTED) → не торгувати
+
+   f. Залежно від режиму:
+        FULL_AUTO    → executeAndNotify() одразу
+        SEMI_AUTO    → OK + inZone → одразу, інакше → картка підтвердження
+        CONFIRM_ONLY → завжди картка підтвердження
+
+   g. Картка підтвердження: TTL 30 хв, нагадування за 5 хв до закінчення
+      Скасування → updateSignalStatus(CANCELLED)
+      TTL expired → updateSignalStatus(EXPIRED)
+
+5. При підтвердженні / авто-виконанні (executeOrder):
+   a. applyLeverage() → setMarginType(ISOLATED) + setLeverage(N)
+   b. openFullPosition() → entry ордер + SL + TP ордери
+      TP розподіл: TP1=40%, TP2=30%, TP3=20%, TP4=10%
+      SL і TP завжди з quantity + reduceOnly (не closePosition!)
+   c. openTrade() → зберігає угоду в БД (таблиця trades), статус OPEN
+      Автоматично створює перший запис в sl_history (reason=INITIAL)
+      і першу подію в trade_events (TRADE_OPENED)
+   d. updateSignalStatus(TRADED) → сигнал помічено як відторгований
+   e. watchPosition() → реєструє позицію в моніторі з tradeId в meta
+
+
+МЕНЕДЖМЕНТ ПОЗИЦІЇ (positionMonitor.js)
+----------------------------------------
+Polling кожні MONITOR_INTERVAL_MS мс.
+
+Watchlist: symbol → { side, entryPrice, slPrice, tpPrices[], tpTriggered[],
+                       trailingActive, interval, tickCount, timeoutCandles,
+                       tp1Reached, tradeId }
+
+tradeId — ключовий зв'язок з БД. Якщо null (позиція відкрита без БД або
+до інтеграції) — всі DB виклики пропускаються через `if (meta.tradeId)`.
+
+Логіка кожного тіку:
+  updatePeakDrawdown() — оновлює maxDrawdownPct і maxProfitPct в trades кожен тік
+
+  trailingActive = true
+    → activateTrailingStop() (ATR×1.5, SL рухається тільки в профіт)
+    → addSlMove(reason=TRAILING) при кожному оновленні SL
+
+  TP рівні по порядку (зупиняється на першому недосягнутому):
+    TP1 hit → partialClose 40% → SL to BE+ → tp1Reached=true
+              → markTPHit(1) + recordPartialClose + addSlMove(BE_PLUS)
+              + getMomentum(): weak → extra partialClose 25%
+                               → recordPartialClose + addEvent(MOMENTUM_WEAK)
+    TP2 hit → partialClose 30% → SL to TP1
+              → markTPHit(2) + recordPartialClose + addSlMove(TP1)
+              + getMomentum(): strong → реалокація 15% з TP2 в TP3
+                               → addEvent(MOMENTUM_STRONG)
+    TP3 hit → partialClose 20% → SL to TP2
+              → markTPHit(3) + recordPartialClose + addSlMove(TP2)
+    TP4 hit → partialClose 10% → trailingActive = true
+              → markTPHit(4) + recordPartialClose + addEvent(TRAILING_ACTIVATED)
+
+  tp1Reached + ціна ≤ entryPrice (LONG) → fake breakout → partialClose 25%
+    → recordPartialClose + addEvent(FAKE_BREAKOUT_DETECTED)
+
+  TP1 не досягнуто за timeoutCandles тіків → earlyExit (close 100%)
+    → recordPartialClose + closeTrade(reason=early_exit_timeout)
+
+  Позиція зникла з біржі → addEvent(POSITION_DISAPPEARED) → closeTrade(reason=sl_hit)
+    → видалити з watchlist, повідомити адміна
+
+
+ВІДНОВЛЕННЯ ПІСЛЯ ПЕРЕЗАПУСКУ
+-------------------------------
+restoreWatchlistFromDB() — викликається в index.js після startMonitor().
+
+Читає всі trades зі статусом OPEN або PARTIALLY_CLOSED.
+Для кожної угоди перевіряє чи позиція ще є на біржі (getOpenPositions):
+
+  Позиція є на біржі:
+    → відновлює запис у watchlist з tradeId, side, entryPrice, slPrice,
+      tpPrices, tpTriggered (реконструюється з tp1Hit..tp4Hit)
+    → timeoutCandles скидається в 0 (не виходимо сліпо після перезапуску)
+    → addEvent(TRADE_OPENED, meta: { reason: 'restored_after_restart' })
+
+  Позиція зникла з біржі поки бот спав:
+    → closeTrade(reason=sl_hit, notes='Closed while bot was offline')
+    → addEvent(POSITION_DISAPPEARED, meta: { reason: 'bot_restart_not_found' })
+
+Після завершення — Telegram-повідомлення адміну з кількістю відновлених
+і закритих позицій.
+
+
+БАЗА ДАНИХ (src/db/)
+----------------------
+Залежності: sequelize + better-sqlite3
+Файл БД:    data/trading.db (створюється автоматично)
+
+Таблиці:
+
+  signals
+    Кожен сигнал з каналу незалежно від результату.
+    Поля: symbol, side, entryLow/High/Mid, slPrice, tpPrices (JSON),
+          timeframe, accuracy, rawText, status, rejectReason, priceAtSignal.
+    Статуси: PENDING → TRADED | REJECTED | EXPIRED | CANCELLED | PAUSED
+
+  trades
+    Одна позиція від відкриття до закриття.
+    FK: signalId → signals.id (NULL якщо ручне відкриття)
+    Мінімальний набір аналітики:
+      entry/exit price, sl initial/final, tp1-4Hit, quantity, leverage,
+      riskPerTradeUsdt, riskPerTradePct, balanceAtEntry,
+      profitUsdt, profitR, profitPct,
+      maxDrawdownPct, maxProfitPct,
+      openedAt, closedAt, timeInTradeMs,
+      closeReason, tradingMode, interval.
+    Статуси: OPEN → PARTIALLY_CLOSED → CLOSED
+
+  trade_events
+    Хронологія подій по позиції (FK: tradeId → trades.id).
+    Типи подій (EVENT_TYPES):
+      TRADE_OPENED, TRADE_CLOSED, PARTIAL_CLOSE,
+      TP1_HIT .. TP4_HIT,
+      SL_MOVED_BE, SL_MOVED_TP1, SL_MOVED_TP2, SL_MOVED_TRAILING, SL_MOVED_MANUAL,
+      MOMENTUM_WEAK, MOMENTUM_STRONG,
+      FAKE_BREAKOUT_DETECTED, EARLY_EXIT_TIMEOUT,
+      TRAILING_ACTIVATED, POSITION_DISAPPEARED.
+    Поля: eventType, price, closedFraction, closedQuantity,
+          slFrom, slTo, unrealisedPnlUsdt, meta (JSON), occurredAt.
+
+  sl_history
+    Кожне переміщення SL по позиції (FK: tradeId → trades.id).
+    Причини (SL_MOVE_REASONS): INITIAL, BE_PLUS, TP1, TP2, TRAILING, MANUAL.
+    Поля: reason, slPricePrev, slPriceNew, markPrice,
+          distanceFromPricePct, orderId, movedAt.
+    Дає можливість аналізувати:
+      - ефективність BE+ (скільки угод зупинились по SL після переносу)
+      - trailing lag (середня відстань SL від ціни)
+      - початковий vs фінальний SL
+
+tradeRepository.js — єдина точка доступу до БД для решти системи.
+Всі функції огорнуті try/catch — помилки БД не переривають торгівлю.
+
+Ключові функції:
+  saveSignal(parsed, priceAtSignal)
+  updateSignalStatus(signalDbId, status, rejectReason)
+  openTrade({ signalId, symbol, side, ... })    → автоматично створює sl_history INITIAL
+  markTPHit(tradeId, tpLevel, markPrice)
+  recordPartialClose(tradeId, fraction, price, reason)
+  addSlMove({ tradeId, reason, slPricePrev, slPriceNew, markPrice, orderId })
+  addEvent({ tradeId, eventType, price, meta, ... })
+  closeTrade(tradeId, { exitPrice, profitUsdt, slPriceFinal, closeReason })
+  updatePeakDrawdown(tradeId, markPrice, side, entryPrice)
+  findOpenTrade(symbol)
+  getOpenTrades()
+  getTradeSummary()                             → для /status команди
+
+analytics.js — готові аналітичні запити:
+  slOptimizationReport()    — середній R по ширині SL (buckets 0.5%)
+  maeReport()               — max adverse excursion до TP1
+  tpHitRate()               — hit rate TP1/2/3/4 і win rate
+  closeReasonBreakdown()    — що найчастіше закриває угоди
+  trailingEfficiency()      — середній trailing lag від ціни
+  beEffectiveness()         — результати після BE+ переносу
+  symbolStats()             — PnL, win rate, avg R по символу
+  modeStats()               — статистика по режиму торгівлі
+  signalRejectionStats()    — причини відхилення сигналів
+  equityCurve()             — кумулятивний PnL по часу (для графіку)
+
+
+RISK ENGINE (riskEngine.js)
+-----------------------------
+Формули (leverage.txt):
+  delta         = |entry - SL| / entry
+  targetRiskUsd = balance × riskPct (0.75%)
+  positionUsdt  = targetRiskUsd / delta
+  leverage      = positionUsdt / balance → ceil → cap maxLeverage (10x)
+  quantity      = positionUsdt / entryPrice → round to quantityPrecision
+
+Фільтри REJECT:
+  delta < 0.2%              — SL занадто вузький (шум)
+  delta > 5.5%              — SL занадто широкий
+  realRisk > target × 1.5   — критичне перевищення ризику
+
+Фільтри CONFIRM (потрібне підтвердження):
+  leverage обрізано до maxLeverage
+  позиція збільшена до minNotional
+  realRisk > target × 1.2
+
+validateMarketEntry() — 4 перевірки по порядку:
+  1. SL не порушений
+  2. TP1 не досягнуто
+  3. slippage від межі зони ≤ maxSlippagePct (2%)
+  4. R:R від поточної ціни до TP1 ≥ minRR (1.5)
+  Повертає: { valid, inZone, slipped, slippagePct, rrFromCurrent, reason }
+
+
+РЕЖИМИ ТОРГІВЛІ (tradingMode.js)
+----------------------------------
+CONFIRM_ONLY — дефолт при старті (безпечний)
+SEMI_AUTO    — авто якщо riskEngine=OK і ціна в зоні, інакше confirm
+FULL_AUTO    — авто всі валідні сигнали (тільки REJECT блокує)
+PAUSED       — ігнорувати всі сигнали (сигнал зберігається в БД зі статусом PAUSED)
+
+Перемикання: /mode full_auto | semi_auto | confirm | pause
+Стан in-memory — скидається при перезапуску (дефолт = CONFIRM_ONLY)
+Режим на момент виконання зберігається в trades.tradingMode для аналітики.
+
+
+BINANCE.JS — КЛЮЧОВІ ДЕТАЛІ
+-----------------------------
+- SL і TP НІКОЛИ не використовують closePosition:true
+  (конфліктує з множинними partial TP на одному символі)
+  Завжди: quantity + reduceOnly=true
+
+- openFullPosition розподіляє qty пропорційно { 1:40%, 2:30%, 3:20%, 4:10% }
+  нормалізує якщо передано менше 4 TP
+
+- updateStopLoss: cancel старий STOP_MARKET ордер → place новий
+- moveSLAfterTP(symbol, tpLevel, tpPrices): центральний метод переносу SL
+- activateTrailingStop: ATR з /fapi/v1/klines, рухає SL тільки в профіт
+- getATR / getMomentum: публічні ендпоінти через publicGet() (з логуванням)
+- getMarkPrice / getSymbolInfo: через publicGet()
+
+
+TELEGRAM КОМАНДИ (commands.js)
+--------------------------------
+/start           — список команд + поточний режим
+/status          — режим + баланс + параметри ризику (riskPct, maxLeverage, SL діапазон)
+/mode <mode>     — змінити режим торгівлі
+/positions       — відкриті позиції з PnL, entry, mark, leverage, liq
+/orders [SYM]    — відкриті ордери по символу або всі
+/balance         — баланс USDT (доступно / всього)
+/watch           — watchlist: TP статуси (✅), trailing, тіки timeout, tradeId
+/sl SYM price    — ручний перенос SL + синхронізація watchlist
+/be SYM          — SL в Break-Even+ (entry + 3 tickSize)
+/close SYM 0.5   — закрити 50% позиції по ринку (0.01–1.0)
+/cancel SYM ID   — скасувати конкретний ордер
+/cancelall SYM   — всі ордери по символу
+
+
+ENV ЗМІННІ
+-----------
+Обов'язкові:
+  BINANCE_API_KEY, BINANCE_SECRET_KEY
+  BINANCE_TESTNET=true|false
+  TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID
+
+Для слухача каналу (отримати через node src/auth.js):
+  TELEGRAM_API_ID, TELEGRAM_API_HASH
+  TELEGRAM_SESSION_STRING
+  TELEGRAM_SIGNAL_CHANNEL_ID
+
+Опціональні:
+  MONITOR_INTERVAL_MS   (default 5000)
+  LOG_LEVEL             (default info)    — debug показує SQL запити
+
+
+ПОРЯДОК СТАРТУ (index.js)
+---------------------------
+1. initDatabase()              — підключення SQLite, sync таблиць
+2. initBot() + registerCommands() + registerConfirmationHandler()
+3. setNotifier() + startMonitor()
+4. restoreWatchlistFromDB()    — відновлення відкритих позицій після перезапуску
+5. TelegramSourceListener.connect() + startListening()
+6. sendMarkdown() — Telegram-повідомлення адміну про старт
+
+
+ВАЖЛИВІ НЮАНСИ ДЛЯ ПРОДОВЖЕННЯ
+---------------------------------
+1. signalParser: RE_ENTRY парсить "Entry Zone: HIGH - LOW" — перший номер = entryHigh,
+   другий = entryLow. Якщо формат каналу інший — перевірити і виправити.
+
+2. При market-вході entryPrice для watchPosition і openTrade береться з
+   result.entry.avgPrice (реальна ціна виконання), не з сигналу.
+
+3. tradeId в meta watchlist — ключовий зв'язок. Якщо null (позиція відкрита
+   до появи DB-шару або вручну через Binance) — всі if (meta.tradeId) пропускаються,
+   торгівля продовжується без запису в БД.
+
+4. SEMI_AUTO: market-вхід (slipped=true) ЗАВЖДИ іде на підтвердження навіть якщо
+   riskEngine=OK — навмисно, бо це відхилення від плану.
+
+5. Плече завжди ISOLATED, завжди integer (Math.ceil).
+
+6. maxDeltaPct змінено з 4.0% на 5.5% в RISK_CONFIG (riskEngine.js).
+
+7. profitUsdt в closeTrade може бути null якщо позиція закрилась поки бот
+   спав (bot_restart_not_found). PnL в цьому випадку можна отримати з
+   Binance income history і оновити вручну або додати окремий reconcile скрипт.
+
+8. analytics.js використовує raw SQL через db.query() — запити написані
+   під SQLite синтаксис (ROUND, CAST, window functions підтримуються з SQLite 3.25+).

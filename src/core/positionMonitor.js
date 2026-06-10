@@ -219,15 +219,9 @@ export async function restoreWatchlistFromDB() {
         exitPrice:    null,  // ціна невідома — закрили поки бот спав
         profitUsdt:   null,
         slPriceFinal: trade.slPriceFinal ?? trade.slPriceInitial,
-        closeReason:  'sl_hit',
+        closeReason:  'manual',
         notes:        'Closed while bot was offline',
       }).catch(err => logger.error('Failed to close stale trade', { err: err.message }));
-
-      await addEvent({
-        tradeId:   trade.id,
-        eventType: EVENT_TYPES.POSITION_DISAPPEARED,
-        meta:      { reason: 'bot_restart_not_found' },
-      }).catch(() => {});
 
       skipped++;
       continue;
@@ -253,12 +247,6 @@ export async function restoreWatchlistFromDB() {
       tp1Reached:     trade.tp1Hit ?? false,
       tradeId:        trade.id,
     });
-
-    await addEvent({
-      tradeId:   trade.id,
-      eventType: EVENT_TYPES.TRADE_OPENED,
-      meta:      { reason: 'restored_after_restart' },
-    }).catch(() => {});
 
     logger.info('restoreWatchlistFromDB: restored', {
       tradeId: trade.id, symbol: trade.symbol, side: trade.side,
@@ -323,7 +311,8 @@ async function tick() {
             exitPrice:    lastMarkPrice,
             profitUsdt:   null,
             slPriceFinal: meta.slPrice,
-            closeReason:  'sl_hit',
+            closeReason:  'manual',
+            notes:        'Position disappeared from exchange while monitoring',
           }).catch(err => logger.error('closeTrade on disappear failed', { err: err.message }));
         }
       }
@@ -412,6 +401,7 @@ async function processPosition(symbol, meta, markPrice) {
 async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
   const tpDistribution = { 1: 0.40, 2: 0.30, 3: 0.20, 4: 0.10 };
   const closeFraction  = tpDistribution[tpLevel] ?? 0.25;
+  const prevSLBeforeMove = meta.slPrice;
 
   // ── Крок 1: Закрити частку ──────────────────────────────────────────────────
   await partialClose(symbol, closeFraction, `tp${tpLevel}_hit`);
@@ -439,8 +429,9 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
   let newSLPrice       = meta.slPrice; // fallback
 
   if (tpLevel === 1) {
-    meta.slPrice    = meta.entryPrice; // приблизно BE+
-    newSLPrice      = meta.entryPrice;
+    const slFromExchange = slResult?.stopPrice != null ? parseFloat(slResult.stopPrice) : null;
+    meta.slPrice    = slFromExchange ?? meta.entryPrice; // fallback якщо біржа не повернула stopPrice
+    newSLPrice      = meta.slPrice;
     meta.tp1Reached = true;
     meta.tickCount  = 0;
     newSLDescription = 'BE+';
@@ -466,15 +457,10 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
 
   // Записати SL move якщо є відповідний reason (TP4 → trailing, не SL move)
   if (meta.tradeId && slReasonMap[tpLevel]) {
-    const prevSL = tpLevel === 1 ? meta.slPrice : // вже оновлено — передаємо старе значення нижче
-      tpLevel === 2 ? meta.tpPrices[0] : meta.tpPrices[1];
-
     await addSlMove({
       tradeId:     meta.tradeId,
       reason:      slReasonMap[tpLevel],
-      slPricePrev: tpLevel === 1
-        ? meta.entryPrice  // до BE+ slPrice зберігався як initial
-        : meta.tpPrices[tpLevel - 2], // SL до цього кроку = попередній TP
+      slPricePrev: prevSLBeforeMove,
       slPriceNew:  newSLPrice,
       markPrice,
       orderId:     slResult?.orderId?.toString() ?? null,

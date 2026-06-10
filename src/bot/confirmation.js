@@ -163,6 +163,22 @@ export async function requestConfirmation(order) {
     return null;
   });
 
+  // Без валідного riskResult забороняємо виконання в будь-якому режимі.
+  if (!riskResult) {
+    const reason = 'Risk calculation failed';
+    logger.error('Signal rejected: risk calculation unavailable', {
+      symbol: order.symbol,
+      signalDbId: order._signalDbId,
+    });
+    await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
+    await sendMarkdown(
+      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
+      `*Причина:* ${reason}\n\n` +
+      `_Ордер не виставлено_`
+    );
+    return null;
+  }
+
   const enrichedOrder = {
     ...order,
     entryPrice: effectiveEntry,
@@ -490,8 +506,15 @@ async function executeOrder(order, risk, balance = null) {
       return null;
     });
 
-    // Оновити сигнал як TRADED
-    await updateSignalStatus(order._signalDbId, 'TRADED');
+    // Позначаємо TRADED тільки якщо запис угоди реально створився в БД.
+    if (tradeRecord?.id) {
+      await updateSignalStatus(order._signalDbId, 'TRADED');
+    } else {
+      logger.error('Trade was executed but DB record was not created; signal status not set to TRADED', {
+        symbol,
+        signalDbId: order._signalDbId ?? null,
+      });
+    }
 
     // Реєструємо в watchlist — передаємо tradeId для positionMonitor
     watchPosition(symbol, {

@@ -255,6 +255,10 @@ export async function getOpenOrders(symbol = null) {
   return get('/fapi/v1/openOrders', symbol ? { symbol } : {});
 }
 
+export async function getOrder(symbol, orderId) {
+  return get('/fapi/v1/order', { symbol, orderId });
+}
+
 /**
  * Розмістити ринковий або лімітний ордер.
  */
@@ -589,12 +593,24 @@ export async function openFullPosition({
   });
   logger.info('Entry placed', { symbol, side, entryType, entryPrice, quantity });
 
+  // Для LIMIT вхід може ще не бути виконаним; захисні reduceOnly ордери
+  // ставимо тільки після fill, щоб уникнути невалідного стану.
+  let filledQuantity = quantity;
+  if (entryType === 'LIMIT') {
+    const filledOrder = await waitForOrderFilled(symbol, results.entry.orderId);
+    filledQuantity = parseFloat(filledOrder.executedQty || quantity);
+
+    if (!Number.isFinite(filledQuantity) || filledQuantity <= 0) {
+      throw new Error(`LIMIT order filledQty is invalid for ${symbol}`);
+    }
+  }
+
   // 2. Stop-Loss на повний розмір позиції (quantity + reduceOnly, без closePosition)
   results.sl = await placeStopLoss({
     symbol,
     side:      oppositeSide,
     stopPrice: slPrice,
-    quantity,
+    quantity:  filledQuantity,
   });
 
   // 3. Take-Profits з розподілом за планом
@@ -612,7 +628,7 @@ export async function openFullPosition({
     for (let i = 0; i < tpPrices.length; i++) {
       const tpIndex = distKeys[i];
       const share   = distribution[tpIndex] / totalShare; // нормалізуємо на випадок неповного набору TP
-      const tpQty   = parseFloat((quantity * share).toFixed(info.quantityPrecision));
+      const tpQty   = parseFloat((filledQuantity * share).toFixed(info.quantityPrecision));
 
       if (tpQty <= 0) {
         logger.warn('TP qty is 0, skipping', { symbol, tpIndex, share });
@@ -638,6 +654,25 @@ export async function openFullPosition({
   });
 
   return results;
+}
+
+async function waitForOrderFilled(symbol, orderId, timeoutMs = 120000, pollIntervalMs = 1500) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const order = await getOrder(symbol, orderId);
+    const status = order?.status;
+
+    if (status === 'FILLED') return order;
+
+    if (status === 'CANCELED' || status === 'REJECTED' || status === 'EXPIRED') {
+      throw new Error(`Entry order ${orderId} ${status}`);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+
+  throw new Error(`Entry order ${orderId} was not filled within ${Math.round(timeoutMs / 1000)}s`);
 }
 
 // ─── Momentum-based management ────────────────────────────────────────────────

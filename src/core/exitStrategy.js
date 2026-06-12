@@ -17,16 +17,37 @@ export function isPositionTimedOut({ entryTime, timeoutCandles, interval, now = 
   return now >= entryTime + timeoutCandles * intervalMs;
 }
 
-export function getTpCloseFraction(tpLevel, totalLevels = 4) {
-  if (tpLevel >= totalLevels) return 0;
+export const TP_DISTRIBUTION = [0.45, 0.35, 0.15, 0.05];
 
-  const initialShares = [0.40, 0.30, 0.20];
-  const desiredInitialShare = initialShares[tpLevel - 1] ?? 0;
-  const alreadyClosed = initialShares
-    .slice(0, tpLevel - 1)
-    .reduce((sum, share) => sum + share, 0);
+export function normalizedTpShares(levelCount, distribution = TP_DISTRIBUTION) {
+  const selected = distribution.slice(0, levelCount);
+  const total = selected.reduce((sum, share) => sum + share, 0);
+  return selected.map(share => share / total);
+}
 
-  return desiredInitialShare / (1 - alreadyClosed);
+export function allocateTpQuantities(
+  totalQuantity,
+  precision,
+  levelCount,
+  distribution = TP_DISTRIBUTION,
+) {
+  const shares = normalizedTpShares(levelCount, distribution);
+  const factor = 10 ** precision;
+  let allocated = 0;
+
+  return shares.map((share, index) => {
+    if (index === shares.length - 1) {
+      return Math.max(0, Math.round((totalQuantity - allocated) * factor) / factor);
+    }
+    const quantity = Math.floor(totalQuantity * share * factor) / factor;
+    allocated += quantity;
+    return quantity;
+  });
+}
+
+export function expectedRemainingAfterTp(level, initialQuantity, shares = TP_DISTRIBUTION) {
+  const closedShare = shares.slice(0, level).reduce((sum, share) => sum + share, 0);
+  return initialQuantity * Math.max(0, 1 - closedShare);
 }
 
 export function classifyMomentum(candles, side = null) {
@@ -46,6 +67,23 @@ export function classifyMomentum(candles, side = null) {
   if (favorableDirection && volumeStrong && rangeStrong) return 'strong';
   if (!favorableDirection || last.volume < avgVolume * 0.7) return 'weak';
   return 'neutral';
+}
+
+export function updateReversalState({
+  previousCandleTime = null,
+  weakCount = 0,
+  assessment,
+}) {
+  if (!assessment || assessment.candleTime === previousCandleTime) {
+    return { candleTime: previousCandleTime, weakCount, shouldExit: false };
+  }
+
+  const nextWeakCount = assessment.status === 'weak' ? weakCount + 1 : 0;
+  return {
+    candleTime: assessment.candleTime,
+    weakCount: nextWeakCount,
+    shouldExit: nextWeakCount >= 2,
+  };
 }
 
 export function calculateATR(candles, period = 14) {

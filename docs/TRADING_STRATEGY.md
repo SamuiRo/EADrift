@@ -120,10 +120,10 @@ realRiskUsdt = quantity × entryPrice × delta
 
 | Рівень | Частка початкової позиції | Дія після досягнення |
 |---|---:|---|
-| TP1 | 40% | SL → BE+, перевірка слабкого momentum |
-| TP2 | 30% | SL → TP1, перевірка сильного momentum |
-| TP3 | 20% | SL → TP2 |
-| Останній доступний TP | 0% | залишити runner та увімкнути ATR trailing |
+| TP1 | 45% | Binance fill → SL → BE+, перевірка слабкого momentum |
+| TP2 | 35% | Binance fill → SL → TP1 та увімкнути ATR trailing |
+| TP3 | 15% | Binance fill, trailing продовжує захищати залишок |
+| TP4 | 5% | Binance fill закриває фінальний залишок |
 
 BE+:
 
@@ -134,13 +134,16 @@ LONG:  BE+ = entryPrice + buffer
 SHORT: BE+ = entryPrice - buffer
 ```
 
-Усі SL/TP-ордери використовують:
+TP-ордери використовують:
 
 ```text
 reduceOnly = true
 workingType = MARK_PRICE
 priceProtect = TRUE
 ```
+
+SL використовує Binance `STOP_MARKET` з `closePosition=true`, тому завжди покриває
+актуальний залишок позиції після часткових TP.
 
 ## 6. Momentum
 
@@ -161,9 +164,13 @@ rangeStrong  = lastRange  > avgRange  × 1.2
 - `weak`, якщо напрям свічки протилежний позиції або обсяг нижче `avgVolume × 0.7`;
 - інакше `neutral`.
 
-Після TP1 слабкий momentum закриває додатково 25% від поточної позиції.
+До TP1 два послідовні слабкі або протилежні закриті candles закривають позицію
+достроково. Одна й та сама candle не може бути порахована двічі.
 
-Після TP2 сильний momentum підтверджує утримання runner до TP3/trailing.
+Після TP1 слабкий momentum закриває додатково 25% від поточної позиції та
+перебудовує решту Binance TP/SL під новий залишок.
+
+Після фактичного Binance fill TP2 активується ATR trailing.
 
 ## 7. Fake breakout
 
@@ -191,7 +198,7 @@ TR = max(
 ATR = average(TR)
 ```
 
-Після останнього доступного TP:
+Після TP2:
 
 ```text
 LONG:  trailPrice = markPrice - ATR × 1.5

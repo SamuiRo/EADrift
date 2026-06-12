@@ -97,8 +97,8 @@ SL/TP/R:R/slippage, перераховує risk та відхиляє сигна
 1. Виставляє MARKET або LIMIT entry.
 2. Для LIMIT чекає статус `FILLED`, polling кожні 1.5 секунди, максимум 120 секунд.
 3. Виставляє STOP_MARKET на всю виконану кількість.
-4. Передає TP-виконання position monitor-у. Біржові TP-ордери не створюються, щоб
-   уникнути подвійного закриття та дозволити momentum/fake-breakout/trailing рішення.
+4. Виставляє reduce-only TAKE_PROFIT_MARKET ордери на Binance з розподілом
+   `45% / 35% / 15% / 5%`.
 
 Якщо TP-рівнів менше чотирьох, частки нормалізуються до 100% на наявні рівні.
 
@@ -120,11 +120,11 @@ flowchart TD
     A["Position tick"] --> T{"Trailing active?"}
     T -->|yes| TR["ATR x 1.5 trailing update"]
     T -->|no| P["Check untriggered TP levels in order"]
-    P -->|TP1| P1["Close 40% -> SL BE+ -> momentum"]
-    P -->|TP2| P2["Close 30% -> SL TP1 -> momentum"]
-    P -->|TP3| P3["Close 20% -> SL TP2"]
-    P -->|TP4| P4["Keep runner -> trailing active"]
-    P -->|TP1 not hit| TO["Increment timeout tick"]
+    P -->|Binance TP1 FILLED| P1["Record fill -> SL BE+ -> momentum"]
+    P -->|Binance TP2 FILLED| P2["Record fill -> SL TP1 -> trailing active"]
+    P -->|Binance TP3 FILLED| P3["Record fill"]
+    P -->|Binance TP4 FILLED| P4["Record fill / position closes"]
+    P -->|TP1 not hit| TO["Check timeframe-based timeout and reversal"]
     P1 --> FB["Check fake breakout"]
     P2 --> FB
     P3 --> FB
@@ -133,9 +133,9 @@ flowchart TD
 
 TP-рівні перевіряються послідовно. Якщо нижчий ще не досягнутий, вищі в цьому tick не обробляються.
 
-TP1/TP2/TP3 закривають відповідно 40%/30%/20% початкової позиції через частки
-від поточного залишку. Останній доступний TP не закриває runner, а активує ATR trailing.
-Для стандартних чотирьох TP runner становить приблизно 10% початкової позиції.
+Binance є єдиним виконавцем звичайних TP та SL. Monitor не дублює TP за mark price:
+він перевіряє фактичний статус ордерів і лише після `FILLED` виконує додаткові дії.
+До TP1 два послідовні слабкі/протилежні закриті candles активують ранній вихід.
 
 ## 6. Відновлення після рестарту
 
@@ -144,7 +144,7 @@ TP1/TP2/TP3 закривають відповідно 40%/30%/20% початко
 - якщо позиція існує, watchlist відновлюється з TP flags і останнім SL;
 - якщо позиції немає, trade закривається як `manual` з note `Closed while bot was offline`;
 - `timeoutCandles` після рестарту встановлюється в `0`;
-- `trailingActive` відновлюється, якщо останній доступний TP уже був досягнутий.
+- `trailingActive` відновлюється, якщо TP2 уже був досягнутий.
 
 Відновлення не створює повторний `TRADE_OPENED`.
 

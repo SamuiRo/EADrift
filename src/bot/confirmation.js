@@ -54,7 +54,7 @@ import {
 const CONFIRM_TTL_MS     = 30 * 60 * 1000; // 30 хвилин
 const REMINDER_BEFORE_MS =  5 * 60 * 1000; // нагадування за 5 хв
 
-const TP_DISTRIBUTION = { 1: 40, 2: 30, 3: 20, 4: 10 };
+const TP_DISTRIBUTION = { 1: 45, 2: 35, 3: 15, 4: 5 };
 
 class ConfirmationRejectedError extends Error {}
 
@@ -619,6 +619,8 @@ async function executeOrder(order, risk, balance = null) {
       side:       side === 'BUY' ? 'LONG' : 'SHORT',
       entryPrice: actualEntryPrice,
       slPrice, tpPrices, interval, timeoutCandles,
+      initialQuantity: risk?.quantity ?? quantity,
+      tpOrders: result.tps ?? [],
       tradeId:    tradeRecord?.id ?? null,
     });
   }

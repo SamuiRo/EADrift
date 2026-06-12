@@ -335,7 +335,7 @@ async function handleWatch(msg) {
 
     const tpLines = m.tpPrices.map((price, i) => {
       const done  = m.tpTriggered[i] ? ' ✅' : '';
-      const dist  = ['40%', '30%', '20%', '10%'][i] ?? '?';
+      const dist  = ['45%', '35%', '15%', '5%'][i] ?? '?';
       return `  TP${i + 1}: \`${price}\` (${dist})${done}`;
     }).join('\n');
 

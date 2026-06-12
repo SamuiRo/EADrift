@@ -4,19 +4,46 @@ import {
   calculateATR,
   calculateTrailingStop,
   classifyMomentum,
-  getTpCloseFraction,
+  allocateTpQuantities,
+  expectedRemainingAfterTp,
   intervalToMs,
   isPositionTimedOut,
+  normalizedTpShares,
   roundTrailingStop,
+  updateReversalState,
 } from '../src/core/exitStrategy.js';
 
-test('TP fractions leave a 10% runner for trailing', () => {
-  let remaining = 1;
-  for (const level of [1, 2, 3, 4]) {
-    remaining *= 1 - getTpCloseFraction(level, 4);
-  }
-  assert.ok(Math.abs(remaining - 0.1) < 1e-12);
-  assert.equal(getTpCloseFraction(3, 3), 0);
+test('TP distribution is 45/35/15/5 and normalizes incomplete signals', () => {
+  assert.deepEqual(normalizedTpShares(4), [0.45, 0.35, 0.15, 0.05]);
+  assert.ok(Math.abs(expectedRemainingAfterTp(2, 100) - 20) < 1e-12);
+  assert.ok(Math.abs(normalizedTpShares(2)[0] - 0.5625) < 1e-12);
+  assert.deepEqual(allocateTpQuantities(1, 3, 4), [0.45, 0.35, 0.15, 0.05]);
+  assert.equal(allocateTpQuantities(0.007, 3, 4).reduce((sum, qty) => sum + qty, 0), 0.007);
+  assert.deepEqual(
+    allocateTpQuantities(0.55, 3, 3, [0.35, 0.15, 0.05]),
+    [0.35, 0.15, 0.05],
+  );
+});
+
+test('reversal exit requires two distinct weak closed candles', () => {
+  const first = updateReversalState({
+    assessment: { status: 'weak', candleTime: 1 },
+  });
+  assert.equal(first.shouldExit, false);
+
+  const duplicate = updateReversalState({
+    previousCandleTime: first.candleTime,
+    weakCount: first.weakCount,
+    assessment: { status: 'weak', candleTime: 1 },
+  });
+  assert.equal(duplicate.weakCount, 1);
+
+  const second = updateReversalState({
+    previousCandleTime: duplicate.candleTime,
+    weakCount: duplicate.weakCount,
+    assessment: { status: 'weak', candleTime: 2 },
+  });
+  assert.equal(second.shouldExit, true);
 });
 
 test('momentum compares the latest closed candle with prior baseline and direction', () => {

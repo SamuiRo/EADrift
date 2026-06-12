@@ -10,7 +10,9 @@ import {
   calculateATR,
   calculateTrailingStop,
   classifyMomentum,
+  allocateTpQuantities,
   roundTrailingStop,
+  normalizedTpShares,
 } from '../core/exitStrategy.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -173,13 +175,21 @@ export async function getATR(symbol, interval, period = 14) {
  * @param {string} interval
  */
 export async function getMomentum(symbol, interval = '15m', side = null) {
+  return (await getMomentumAssessment(symbol, interval, side)).status;
+}
+
+export async function getMomentumAssessment(symbol, interval = '15m', side = null) {
   const data = await publicGet('/fapi/v1/klines', {
     symbol,
     interval,
     limit: 7,
   });
 
-  return classifyMomentum(data.slice(0, -1).map(toCandle), side);
+  const closed = data.slice(0, -1);
+  return {
+    status: classifyMomentum(closed.map(toCandle), side),
+    candleTime: Number(closed.at(-1)?.[6] ?? closed.at(-1)?.[0]),
+  };
 }
 
 function toCandle(candle) {
@@ -267,31 +277,40 @@ export async function placeOrder({
   return result;
 }
 
-/**
- * Stop-Loss ордер (STOP_MARKET).
- * ВАЖЛИВО: завжди передаємо quantity + reduceOnly, НЕ closePosition.
- * closePosition:true несумісний з частковими TP-ордерами на тому ж символі.
- */
-export async function placeStopLoss({ symbol, side, stopPrice, quantity }) {
+/** Stop-Loss ордер (STOP_MARKET), який завжди закриває актуальний залишок позиції. */
+export async function placeStopLoss({ symbol, side, stopPrice }) {
   const info = await getSymbolInfo(symbol);
-
-  if (!quantity) throw new Error('placeStopLoss: quantity is required (closePosition is not supported)');
 
   const params = {
     symbol,
     side,
     type:        'STOP_MARKET',
     stopPrice:   stopPrice.toFixed(info.pricePrecision),
-    quantity:    quantity.toFixed(info.quantityPrecision),
-    reduceOnly:  'true',
+    closePosition: 'true',
     workingType: 'MARK_PRICE',
     priceProtect: 'TRUE',
   };
 
-  logger.info('Placing SL', { symbol, side, stopPrice, quantity });
+  logger.info('Placing SL', { symbol, side, stopPrice, closePosition: true });
   const result = await post('/fapi/v1/order', params);
   logger.info('SL placed', { orderId: result.orderId, symbol, stopPrice });
   return result;
+}
+
+export async function placeTakeProfit({ symbol, side, stopPrice, quantity }) {
+  const info = await getSymbolInfo(symbol);
+  if (!quantity) throw new Error('placeTakeProfit: quantity is required');
+
+  return post('/fapi/v1/order', {
+    symbol,
+    side,
+    type: 'TAKE_PROFIT_MARKET',
+    stopPrice: stopPrice.toFixed(info.pricePrecision),
+    quantity: quantity.toFixed(info.quantityPrecision),
+    reduceOnly: 'true',
+    workingType: 'MARK_PRICE',
+    priceProtect: 'TRUE',
+  });
 }
 
 export async function cancelOrder(symbol, orderId) {
@@ -302,24 +321,6 @@ export async function cancelOrder(symbol, orderId) {
 export async function cancelAllOrders(symbol) {
   logger.info('Cancelling all orders', { symbol });
   return del('/fapi/v1/allOpenOrders', { symbol });
-}
-
-export async function cancelLegacyTakeProfitOrders(symbol) {
-  const openOrders = await getOpenOrders(symbol);
-  const legacyOrders = openOrders.filter(order => order.type === 'TAKE_PROFIT_MARKET');
-
-  for (const order of legacyOrders) {
-    await cancelOrder(symbol, order.orderId);
-  }
-
-  if (legacyOrders.length > 0) {
-    logger.warn('Cancelled legacy exchange TP orders; positionMonitor is the TP executor', {
-      symbol,
-      count: legacyOrders.length,
-    });
-  }
-
-  return legacyOrders.length;
 }
 
 // ─── SL management ────────────────────────────────────────────────────────────
@@ -336,11 +337,19 @@ export async function updateStopLoss(symbol, newStopPrice, reason = 'manual') {
   if (!position) throw new Error(`No open position for ${symbol}`);
 
   const openOrders = await getOpenOrders(symbol);
-  const existingSL = openOrders.find(o => o.type === 'STOP_MARKET' && o.reduceOnly);
+  const existingStopOrders = openOrders.filter(o => o.type === 'STOP_MARKET');
+  const existingSL = existingStopOrders[0];
 
-  if (existingSL) {
-    await cancelOrder(symbol, existingSL.orderId);
-    logger.info('Old SL cancelled', { symbol, oldSL: existingSL.stopPrice, reason });
+  for (const stopOrder of existingStopOrders) {
+    await cancelOrder(symbol, stopOrder.orderId);
+  }
+  if (existingStopOrders.length > 0) {
+    logger.info('Old SL orders cancelled', {
+      symbol,
+      count: existingStopOrders.length,
+      oldSL: existingSL.stopPrice,
+      reason,
+    });
   }
 
   const slSide = position.side === 'LONG' ? 'SELL' : 'BUY';
@@ -351,7 +360,6 @@ export async function updateStopLoss(symbol, newStopPrice, reason = 'manual') {
       symbol,
       side:      slSide,
       stopPrice: newStopPrice,
-      quantity:  position.size,
     });
   } catch (err) {
     if (existingSL?.stopPrice) {
@@ -359,7 +367,6 @@ export async function updateStopLoss(symbol, newStopPrice, reason = 'manual') {
         symbol,
         side: slSide,
         stopPrice: parseFloat(existingSL.stopPrice),
-        quantity: position.size,
       }).catch(restoreErr => logger.error('Failed to restore previous SL', {
         symbol,
         err: restoreErr.message,
@@ -397,10 +404,9 @@ export async function moveSLtoBreakEven(symbol) {
  *   TP1 hit → SL = entry + BE_offset
  *   TP2 hit → SL = TP1 price
  *   TP3 hit → SL = TP2 price
- *   TP4 hit → вмикаємо trailing (виклич activateTrailingStop окремо)
  *
  * @param {string}   symbol
- * @param {number}   tpLevel      1 | 2 | 3 | 4
+ * @param {number}   tpLevel      1 | 2 | 3
  * @param {number[]} tpPrices     масив [TP1, TP2, TP3, TP4] (0-based index → TP tpPrices[0]=TP1)
  */
 export async function moveSLAfterTP(symbol, tpLevel, tpPrices) {
@@ -423,11 +429,6 @@ export async function moveSLAfterTP(symbol, tpLevel, tpPrices) {
       // SL → TP2 price
       return updateStopLoss(symbol, tpPrices[1], 'trail_TP3→TP2');
 
-    case 4:
-      // Trailing — окремий виклик
-      logger.info('TP4 hit — activate trailing stop manually via activateTrailingStop()', { symbol });
-      return null;
-
     default:
       throw new Error(`Unknown tpLevel: ${tpLevel}`);
   }
@@ -435,7 +436,7 @@ export async function moveSLAfterTP(symbol, tpLevel, tpPrices) {
 
 /**
  * Trailing stop через ATR (план, розділ 4).
- * Активується після TP4.
+ * Активується після TP2.
  *
  * Логіка: SL = max(currentSL, markPrice - ATR * multiplier)
  * Викликати по кожному тіку/моніторингу поки позиція відкрита.
@@ -520,6 +521,59 @@ export async function partialClose(symbol, fraction, reason = 'partial_close') {
   });
 }
 
+export async function syncProtectiveOrders({ symbol, slPrice, tpPrices, tpTriggered = [] }) {
+  const position = await getPosition(symbol);
+  if (!position) return { sl: null, tps: [] };
+
+  const openOrders = await getOpenOrders(symbol);
+  const protective = openOrders.filter(order =>
+    order.type === 'STOP_MARKET' || order.type === 'TAKE_PROFIT_MARKET'
+  );
+  for (const order of protective) {
+    await cancelOrder(symbol, order.orderId);
+  }
+
+  const oppositeSide = position.side === 'LONG' ? 'SELL' : 'BUY';
+  const sl = await placeStopLoss({
+    symbol,
+    side: oppositeSide,
+    stopPrice: slPrice,
+  });
+
+  const remainingLevels = tpPrices
+    .map((price, index) => ({ price, index }))
+    .filter(({ index }) => !tpTriggered[index]);
+  const originalShares = normalizedTpShares(tpPrices.length);
+  const remainingShares = remainingLevels.map(({ index }) => originalShares[index]);
+  const info = await getSymbolInfo(symbol);
+  const quantities = allocateTpQuantities(
+    position.size,
+    info.quantityPrecision,
+    remainingLevels.length,
+    remainingShares,
+  );
+  const tps = [];
+
+  for (let i = 0; i < remainingLevels.length; i++) {
+    const quantity = quantities[i];
+    if (quantity <= 0) continue;
+    const result = await placeTakeProfit({
+      symbol,
+      side: oppositeSide,
+      stopPrice: remainingLevels[i].price,
+      quantity,
+    });
+    tps.push({
+      level: remainingLevels[i].index + 1,
+      price: remainingLevels[i].price,
+      quantity,
+      orderId: result.orderId?.toString(),
+    });
+  }
+
+  return { sl, tps };
+}
+
 /**
  * Early exit: закрити частину або всю позицію якщо немає руху (план, розділ 6).
  *
@@ -534,9 +588,7 @@ export async function earlyExit(symbol, fraction = 1) {
 // ─── Full position setup ──────────────────────────────────────────────────────
 
 /**
- * Відкрити позицію із захисним SL.
- * TP-рівні виконує positionMonitor, щоб уникнути подвійних закриттів і
- * застосовувати momentum/fake-breakout/trailing рішення.
+ * Відкрити позицію із захисними SL та TP-ордерами на Binance.
  *
  * SL виставляється на повний розмір позиції.
  * @param {object} opts
@@ -582,17 +634,32 @@ export async function openFullPosition({
     }
   }
 
-  // 2. Stop-Loss на повний розмір позиції (quantity + reduceOnly, без closePosition)
+  // 2. Stop-Loss із closePosition=true завжди покриває актуальний залишок.
   results.sl = await placeStopLoss({
     symbol,
     side:      oppositeSide,
     stopPrice: slPrice,
-    quantity:  filledQuantity,
   });
 
-  // TP exits are executed by positionMonitor. This avoids racing exchange TP orders
-  // against monitor partial closes and allows momentum/fake-breakout decisions.
   results.tps = [];
+  const info = await getSymbolInfo(symbol);
+  const quantities = allocateTpQuantities(filledQuantity, info.quantityPrecision, tpPrices.length);
+  for (let i = 0; i < tpPrices.length; i++) {
+    const tpQuantity = quantities[i];
+    if (tpQuantity <= 0) continue;
+    const tp = await placeTakeProfit({
+      symbol,
+      side: oppositeSide,
+      stopPrice: tpPrices[i],
+      quantity: tpQuantity,
+    });
+    results.tps.push({
+      level: i + 1,
+      price: tpPrices[i],
+      quantity: tpQuantity,
+      orderId: tp.orderId?.toString(),
+    });
+  }
 
   logger.info('Full position opened', {
     symbol,
@@ -600,7 +667,7 @@ export async function openFullPosition({
     entry:  entryPrice || 'MARKET',
     sl:     slPrice,
     tps:    tpPrices,
-    tpExecutor: 'positionMonitor',
+    tpExecutor: 'binance',
   });
 
   return results;

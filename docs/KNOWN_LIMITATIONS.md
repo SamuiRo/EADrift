@@ -4,18 +4,19 @@
 
 ## Високий пріоритет
 
-### 1. Адаптивні TP залежать від доступності monitor
+### 1. Додаткові виходи та пересування SL залежать від monitor
 
-Position monitor є єдиним виконавцем TP, momentum, fake breakout і trailing-рішень.
-Це прибирає подвійні закриття, але під час зупинки процесу TP не виконаються.
-На Binance залишається захисний STOP_MARKET.
+Binance самостійно виконує всі стандартні TP та SL навіть коли бот недоступний.
+Але reversal exit, fake breakout, weak momentum, trailing updates і пересування SL
+потребують активного monitor.
 
-### 2. Ручні partial close не повністю синхронізують захисний SL
+### 2. Ручні partial close не повністю синхронізують TP-сітку
 
-Monitor синхронізує SL після своїх partial close, але `/close` та ручні дії поза
-ботом можуть залишити SL розрахованим на старий розмір позиції.
+Monitor синхронізує TP-сітку після своїх partial close, але `/close` та ручні дії поза
+ботом можуть залишити TP-кількості розрахованими на старий розмір позиції.
 
-Потрібен `syncProtectiveOrders(symbol)` після кожної зміни position size.
+SL із `closePosition=true` продовжує покривати весь актуальний залишок. Для ручних
+partial close потрібен `syncProtectiveOrders(symbol)` для перебудови TP-сітки.
 
 ## Середній пріоритет
 

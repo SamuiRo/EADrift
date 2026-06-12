@@ -5,12 +5,12 @@
  * Реалізує повну логіку управління позицією згідно плану:
  *
  *   TP1 hit → close 40% → SL to BE+
- *   TP2 hit → close 30% → SL to TP1
- *   TP3 hit → close 20% → SL to TP2
- *   TP4 hit → close 10% OR activate trailing
+ *   TP2 hit → close 30% of initial position → SL to TP1
+ *   TP3 hit → close 20% of initial position → SL to TP2
+ *   TP4 hit → keep the final runner and activate trailing
  *
  *   + Weak momentum  → extra partial close після TP1
- *   + Strong momentum → reallocate TP2 → TP3
+ *   + Strong momentum → keep runner toward TP3/trailing
  *   + Fake breakout  → extra partial close
  *   + Timeout        → early exit
  *
@@ -26,11 +26,14 @@ import {
   moveSLAfterTP,
   activateTrailingStop,
   partialClose,
-  handleWeakMomentum,
-  handleStrongMomentum,
-  handleFakeBreakout,
   getMomentum,
+  updateStopLoss,
+  cancelLegacyTakeProfitOrders,
 } from '../exchanges/binance.js';
+import {
+  getTpCloseFraction,
+  isPositionTimedOut,
+} from './exitStrategy.js';
 import { logger } from '../shared/logger.js';
 import {
   findOpenTrade,
@@ -59,7 +62,6 @@ import {
  *   interval:       string,
  *   entryTime:      number,
  *   timeoutCandles: number,
- *   tickCount:      number,
  *   tp1Reached:     boolean,
  *   tradeId:        number | null,   ← ID запису в таблиці trades (для DB)
  * }
@@ -97,7 +99,6 @@ export function watchPosition(symbol, meta) {
     interval:       meta.interval       ?? '15m',
     entryTime:      Date.now(),
     timeoutCandles: meta.timeoutCandles ?? 0,
-    tickCount:      0,
     tp1Reached:     false,
     tradeId:        meta.tradeId        ?? null,
   });
@@ -165,7 +166,7 @@ export function getWatchlist() {
       tpTriggered:    meta.tpTriggered,
       trailingActive: meta.trailingActive,
       interval:       meta.interval,
-      tickCount:      meta.tickCount,
+      timeoutCandles: meta.timeoutCandles,
       tradeId:        meta.tradeId,
     };
   }
@@ -200,7 +201,10 @@ export async function restoreWatchlistFromDB() {
   try {
     livePositions = await getOpenPositions();
   } catch (err) {
-    logger.warn('restoreWatchlistFromDB: could not fetch live positions', { err: err.message });
+    logger.error('restoreWatchlistFromDB: aborted because live positions are unavailable', {
+      err: err.message,
+    });
+    return;
   }
 
   const liveSymbols = new Set(livePositions.map(p => p.symbol));
@@ -227,11 +231,19 @@ export async function restoreWatchlistFromDB() {
       continue;
     }
 
+    // Remove TP orders created by older versions; monitor is now the only TP executor.
+    await cancelLegacyTakeProfitOrders(trade.symbol)
+      .catch(err => logger.warn('Could not cancel legacy TP orders', {
+        symbol: trade.symbol,
+        err: err.message,
+      }));
+
     // Позиція жива — відновлюємо в watchlist
     // tpTriggered реконструюємо з tp1Hit..tp4Hit
     const tpCount     = trade.tpPrices?.length ?? 0;
     const tpTriggered = [trade.tp1Hit, trade.tp2Hit, trade.tp3Hit, trade.tp4Hit]
       .slice(0, tpCount);
+    const trailingActive = tpCount > 0 && Boolean(tpTriggered[tpCount - 1]);
 
     watchlist.set(trade.symbol, {
       side:           trade.side,
@@ -239,11 +251,10 @@ export async function restoreWatchlistFromDB() {
       slPrice:        trade.slPriceFinal ?? trade.slPriceInitial,
       tpPrices:       trade.tpPrices ?? [],
       tpTriggered,
-      trailingActive: false,
+      trailingActive,
       interval:       trade.interval ?? '15m',
       entryTime:      new Date(trade.openedAt).getTime(),
       timeoutCandles: 0,  // після перезапуску таймаут скидаємо — краще не виходити з позиції сліпо
-      tickCount:      0,
       tp1Reached:     trade.tp1Hit ?? false,
       tradeId:        trade.id,
     });
@@ -252,6 +263,7 @@ export async function restoreWatchlistFromDB() {
       tradeId: trade.id, symbol: trade.symbol, side: trade.side,
       sl: trade.slPriceFinal ?? trade.slPriceInitial,
       tpTriggered,
+      trailingActive,
     });
 
     restored++;
@@ -370,7 +382,8 @@ async function processPosition(symbol, meta, markPrice) {
     if (!reached) {
       // Якщо TP1 ще не досягнуто — перевіряємо timeout
       if (tpLevel === 1) {
-        await checkTimeout(symbol, meta, markPrice);
+        const timedOut = await checkTimeout(symbol, meta, markPrice);
+        if (timedOut) return;
       }
       break; // вищі TP точно ще не досягнуто
     }
@@ -399,24 +412,31 @@ async function processPosition(symbol, meta, markPrice) {
 // ─── TP hit handler ───────────────────────────────────────────────────────────
 
 async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
-  const tpDistribution = { 1: 0.40, 2: 0.30, 3: 0.20, 4: 0.10 };
-  const closeFraction  = tpDistribution[tpLevel] ?? 0.25;
+  const isFinalTp = tpLevel === meta.tpPrices.length;
+  const closeFraction = getTpCloseFraction(tpLevel, meta.tpPrices.length);
   const prevSLBeforeMove = meta.slPrice;
 
-  // ── Крок 1: Закрити частку ──────────────────────────────────────────────────
-  await partialClose(symbol, closeFraction, `tp${tpLevel}_hit`);
-  logger.info(`TP${tpLevel}: closed ${closeFraction * 100}%`, { symbol, tpPrice });
+  // TP4 hands the remaining runner to trailing instead of closing it.
+  if (closeFraction > 0) {
+    await partialClose(symbol, closeFraction, `tp${tpLevel}_hit`);
+    logger.info(`TP${tpLevel}: closed ${(closeFraction * 100).toFixed(2)}% of remaining position`, {
+      symbol,
+      tpPrice,
+    });
+  }
 
   // Записати в БД
   if (meta.tradeId) {
     await markTPHit(meta.tradeId, tpLevel, markPrice)
       .catch(err => logger.error('markTPHit DB failed', { err: err.message }));
-    await recordPartialClose(meta.tradeId, closeFraction, markPrice, `tp${tpLevel}_hit`)
-      .catch(err => logger.error('recordPartialClose DB failed', { err: err.message }));
+    if (closeFraction > 0) {
+      await recordPartialClose(meta.tradeId, closeFraction, markPrice, `tp${tpLevel}_hit`)
+        .catch(err => logger.error('recordPartialClose DB failed', { err: err.message }));
+    }
   }
 
   // ── Крок 2: Перенести SL ────────────────────────────────────────────────────
-  const slResult = await moveSLAfterTP(symbol, tpLevel, meta.tpPrices);
+  const slResult = isFinalTp ? null : await moveSLAfterTP(symbol, tpLevel, meta.tpPrices);
 
   // Рахуємо новий SL і зберігаємо в sl_history
   const slReasonMap = {
@@ -428,12 +448,37 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
   let newSLDescription = '';
   let newSLPrice       = meta.slPrice; // fallback
 
-  if (tpLevel === 1) {
+  if (isFinalTp) {
+    meta.trailingActive = true;
+    newSLDescription = 'trailing ON';
+    const trailingResult = await activateTrailingStop(symbol, meta.interval);
+    if (trailingResult?.stopPrice != null) {
+      meta.slPrice = parseFloat(trailingResult.stopPrice);
+      newSLPrice = meta.slPrice;
+      newSLDescription = `trailing (${meta.slPrice})`;
+      if (meta.tradeId) {
+        await addSlMove({
+          tradeId: meta.tradeId,
+          reason: SL_MOVE_REASONS.TRAILING,
+          slPricePrev: prevSLBeforeMove,
+          slPriceNew: meta.slPrice,
+          markPrice,
+          orderId: trailingResult.orderId?.toString() ?? null,
+        }).catch(err => logger.error('addSlMove initial TRAILING failed', { err: err.message }));
+      }
+    }
+    if (meta.tradeId) {
+      await addEvent({
+        tradeId:   meta.tradeId,
+        eventType: EVENT_TYPES.TRAILING_ACTIVATED,
+        price:     markPrice,
+      }).catch(() => {});
+    }
+  } else if (tpLevel === 1) {
     const slFromExchange = slResult?.stopPrice != null ? parseFloat(slResult.stopPrice) : null;
     meta.slPrice    = slFromExchange ?? meta.entryPrice; // fallback якщо біржа не повернула stopPrice
     newSLPrice      = meta.slPrice;
     meta.tp1Reached = true;
-    meta.tickCount  = 0;
     newSLDescription = 'BE+';
   } else if (tpLevel === 2) {
     meta.slPrice     = meta.tpPrices[0];
@@ -443,20 +488,10 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
     meta.slPrice     = meta.tpPrices[1];
     newSLPrice       = meta.tpPrices[1];
     newSLDescription = `TP2 (${meta.tpPrices[1]})`;
-  } else if (tpLevel === 4) {
-    meta.trailingActive = true;
-    newSLDescription    = 'trailing ON';
-    if (meta.tradeId) {
-      await addEvent({
-        tradeId:   meta.tradeId,
-        eventType: EVENT_TYPES.TRAILING_ACTIVATED,
-        price:     markPrice,
-      }).catch(() => {});
-    }
   }
 
-  // Записати SL move якщо є відповідний reason (TP4 → trailing, не SL move)
-  if (meta.tradeId && slReasonMap[tpLevel]) {
+  // Записати SL move для TP1-TP3; первинний trailing move записаний у TP4 branch.
+  if (!isFinalTp && meta.tradeId && slReasonMap[tpLevel]) {
     await addSlMove({
       tradeId:     meta.tradeId,
       reason:      slReasonMap[tpLevel],
@@ -470,10 +505,11 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
   // ── Крок 3: Перевірити моментум ─────────────────────────────────────────────
   let momentumNote = '';
   try {
-    const momentum = await getMomentum(symbol, meta.interval);
+    const momentum = await getMomentum(symbol, meta.interval, meta.side);
 
     if (tpLevel === 1 && momentum === 'weak') {
       await partialClose(symbol, 0.25, 'weak_momentum_after_tp1');
+      await syncWatchedStopLoss(symbol, meta);
       momentumNote = '\n⚠️ Слабкий моментум — закрито ще 25%';
       logger.info('Weak momentum after TP1 — extra partial close', { symbol });
 
@@ -489,23 +525,15 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
       }
     }
 
-    if (tpLevel === 2 && momentum === 'strong' && meta.tpPrices[2]) {
-      const reallocated = await handleStrongMomentum(
-        symbol,
-        meta.tpPrices[1],
-        meta.tpPrices[2],
-        meta.interval,
-      );
-      if (reallocated) {
-        momentumNote = '\n🚀 Сильний моментум — частина реалокована в TP3';
-        if (meta.tradeId) {
-          await addEvent({
-            tradeId:   meta.tradeId,
-            eventType: EVENT_TYPES.MOMENTUM_STRONG,
-            price:     markPrice,
-            meta:      { momentum, tp2Price: meta.tpPrices[1], tp3Price: meta.tpPrices[2] },
-          }).catch(() => {});
-        }
+    if (tpLevel === 2 && momentum === 'strong') {
+      momentumNote = '\n🚀 Сильний моментум — runner залишається до TP3/trailing';
+      if (meta.tradeId) {
+        await addEvent({
+          tradeId:   meta.tradeId,
+          eventType: EVENT_TYPES.MOMENTUM_STRONG,
+          price:     markPrice,
+          meta:      { momentum, action: 'keep_runner' },
+        }).catch(() => {});
       }
     }
   } catch (err) {
@@ -516,7 +544,9 @@ async function handleTPHit(symbol, meta, tpLevel, tpPrice, markPrice) {
   await notify(
     `🎯 *${symbol}* — TP${tpLevel} досягнуто\n` +
     `Ціна: \`${markPrice}\` / TP: \`${tpPrice}\`\n` +
-    `Закрито: ${closeFraction * 100}% позиції\n` +
+    (closeFraction > 0
+      ? `Закрито: ${(closeFraction * 100).toFixed(2)}% залишку позиції\n`
+      : `Runner залишено відкритим\n`) +
     `SL → ${newSLDescription}` +
     momentumNote
   );
@@ -557,16 +587,16 @@ async function runTrailing(symbol, meta, markPrice) {
 // ─── Timeout / early exit ─────────────────────────────────────────────────────
 
 async function checkTimeout(symbol, meta, markPrice) {
-  if (!meta.timeoutCandles) return;
-
-  meta.tickCount = (meta.tickCount ?? 0) + 1;
-
-  if (meta.tickCount < meta.timeoutCandles) return;
+  if (!isPositionTimedOut({
+    entryTime: meta.entryTime,
+    timeoutCandles: meta.timeoutCandles,
+    interval: meta.interval,
+  })) return false;
 
   logger.warn('Position timeout — early exit', {
     symbol,
-    tickCount:      meta.tickCount,
     timeoutCandles: meta.timeoutCandles,
+    interval:       meta.interval,
   });
 
   try {
@@ -585,11 +615,13 @@ async function checkTimeout(symbol, meta, markPrice) {
     }
 
     await notify(
-      `⏱ *${symbol}* — timeout (${meta.timeoutCandles} тіків без руху)\n` +
+      `⏱ *${symbol}* — timeout (${meta.timeoutCandles} × ${meta.interval} без TP1)\n` +
       `Позицію закрито автоматично`
     );
+    return true;
   } catch (err) {
     logger.error('Early exit failed', { symbol, err: err.message });
+    return false;
   }
 }
 
@@ -609,6 +641,7 @@ async function checkFakeBreakout(symbol, meta, markPrice) {
 
   try {
     await partialClose(symbol, 0.25, 'fake_breakout_protection');
+    await syncWatchedStopLoss(symbol, meta);
 
     if (meta.tradeId) {
       await recordPartialClose(meta.tradeId, 0.25, markPrice, 'fake_breakout_protection')
@@ -639,5 +672,12 @@ async function notify(message) {
     await notifyCallback(message);
   } catch (err) {
     logger.error('Notify failed', { err: err.message });
+  }
+}
+
+async function syncWatchedStopLoss(symbol, meta) {
+  const result = await updateStopLoss(symbol, meta.slPrice, 'sync_after_partial_close');
+  if (result?.stopPrice != null) {
+    meta.slPrice = parseFloat(result.stopPrice);
   }
 }

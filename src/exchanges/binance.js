@@ -6,23 +6,18 @@ import {
   BINANCE_SECRET_KEY,
   BINANCE_API_KEY,
 } from '../config/app.config.js';
+import {
+  calculateATR,
+  calculateTrailingStop,
+  classifyMomentum,
+  roundTrailingStop,
+} from '../core/exitStrategy.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BASE_URL = BINANCE_TESTNET
   ? 'https://testnet.binancefuture.com'
   : 'https://fapi.binance.com';
-
-/**
- * Розподіл позиції по TP-рівнях (план, розділ 1).
- * Ключ = індекс TP (1-based), значення = частка від загального розміру.
- */
-export const TP_DISTRIBUTION = {
-  1: 0.40,
-  2: 0.30,
-  3: 0.20,
-  4: 0.10,
-};
 
 /**
  * Після якого TP куди переносити SL (план, розділ 3).
@@ -163,21 +158,11 @@ export async function getATR(symbol, interval, period = 14) {
   const data = await publicGet('/fapi/v1/klines', {
     symbol,
     interval,
-    limit: period + 1,
+    limit: period + 2,
   });
 
-  // data: [[openTime, open, high, low, close, volume, ...], ...]
-  const trValues = [];
-  for (let i = 1; i < data.length; i++) {
-    const high  = parseFloat(data[i][2]);
-    const low   = parseFloat(data[i][3]);
-    const prevClose = parseFloat(data[i - 1][4]);
-    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
-    trValues.push(tr);
-  }
-
-  const atr = trValues.reduce((s, v) => s + v, 0) / trValues.length;
-  return atr;
+  // Binance returns the currently forming candle last; trailing uses closed candles only.
+  return calculateATR(data.slice(0, -1).map(toCandle), period);
 }
 
 /**
@@ -187,35 +172,24 @@ export async function getATR(symbol, interval, period = 14) {
  * @param {string} symbol
  * @param {string} interval
  */
-export async function getMomentum(symbol, interval = '15m') {
+export async function getMomentum(symbol, interval = '15m', side = null) {
   const data = await publicGet('/fapi/v1/klines', {
     symbol,
     interval,
-    limit: 5,
+    limit: 7,
   });
 
-  const candles = data.map(c => ({
-    open:   parseFloat(c[1]),
-    high:   parseFloat(c[2]),
-    low:    parseFloat(c[3]),
-    close:  parseFloat(c[4]),
-    volume: parseFloat(c[5]),
-  }));
+  return classifyMomentum(data.slice(0, -1).map(toCandle), side);
+}
 
-  // Середній об'єм
-  const avgVolume = candles.reduce((s, c) => s + c.volume, 0) / candles.length;
-  const lastVolume = candles[candles.length - 1].volume;
-
-  // Середній розмір свічки
-  const avgRange = candles.reduce((s, c) => s + (c.high - c.low), 0) / candles.length;
-  const lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
-
-  const volumeStrong = lastVolume > avgVolume * 1.3;
-  const rangeStrong  = lastRange  > avgRange  * 1.2;
-
-  if (volumeStrong && rangeStrong) return 'strong';
-  if (!volumeStrong && lastVolume < avgVolume * 0.7) return 'weak';
-  return 'neutral';
+function toCandle(candle) {
+  return {
+    open: parseFloat(candle[1]),
+    high: parseFloat(candle[2]),
+    low: parseFloat(candle[3]),
+    close: parseFloat(candle[4]),
+    volume: parseFloat(candle[5]),
+  };
 }
 
 // ─── Account ──────────────────────────────────────────────────────────────────
@@ -320,32 +294,6 @@ export async function placeStopLoss({ symbol, side, stopPrice, quantity }) {
   return result;
 }
 
-/**
- * Take-Profit ордер (TAKE_PROFIT_MARKET).
- * Завжди з явним quantity — не closePosition.
- */
-export async function placeTakeProfit({ symbol, side, stopPrice, quantity }) {
-  const info = await getSymbolInfo(symbol);
-
-  if (!quantity) throw new Error('placeTakeProfit: quantity is required');
-
-  const params = {
-    symbol,
-    side,
-    type:        'TAKE_PROFIT_MARKET',
-    stopPrice:   stopPrice.toFixed(info.pricePrecision),
-    quantity:    quantity.toFixed(info.quantityPrecision),
-    reduceOnly:  'true',
-    workingType: 'MARK_PRICE',
-    priceProtect: 'TRUE',
-  };
-
-  logger.info('Placing TP', { symbol, side, stopPrice, quantity });
-  const result = await post('/fapi/v1/order', params);
-  logger.info('TP placed', { orderId: result.orderId, symbol, stopPrice });
-  return result;
-}
-
 export async function cancelOrder(symbol, orderId) {
   logger.info('Cancelling order', { symbol, orderId });
   return del('/fapi/v1/order', { symbol, orderId });
@@ -354,6 +302,24 @@ export async function cancelOrder(symbol, orderId) {
 export async function cancelAllOrders(symbol) {
   logger.info('Cancelling all orders', { symbol });
   return del('/fapi/v1/allOpenOrders', { symbol });
+}
+
+export async function cancelLegacyTakeProfitOrders(symbol) {
+  const openOrders = await getOpenOrders(symbol);
+  const legacyOrders = openOrders.filter(order => order.type === 'TAKE_PROFIT_MARKET');
+
+  for (const order of legacyOrders) {
+    await cancelOrder(symbol, order.orderId);
+  }
+
+  if (legacyOrders.length > 0) {
+    logger.warn('Cancelled legacy exchange TP orders; positionMonitor is the TP executor', {
+      symbol,
+      count: legacyOrders.length,
+    });
+  }
+
+  return legacyOrders.length;
 }
 
 // ─── SL management ────────────────────────────────────────────────────────────
@@ -379,12 +345,28 @@ export async function updateStopLoss(symbol, newStopPrice, reason = 'manual') {
 
   const slSide = position.side === 'LONG' ? 'SELL' : 'BUY';
 
-  const result = await placeStopLoss({
-    symbol,
-    side:      slSide,
-    stopPrice: newStopPrice,
-    quantity:  position.size,
-  });
+  let result;
+  try {
+    result = await placeStopLoss({
+      symbol,
+      side:      slSide,
+      stopPrice: newStopPrice,
+      quantity:  position.size,
+    });
+  } catch (err) {
+    if (existingSL?.stopPrice) {
+      await placeStopLoss({
+        symbol,
+        side: slSide,
+        stopPrice: parseFloat(existingSL.stopPrice),
+        quantity: position.size,
+      }).catch(restoreErr => logger.error('Failed to restore previous SL', {
+        symbol,
+        err: restoreErr.message,
+      }));
+    }
+    throw err;
+  }
 
   logger.info('SL updated', { symbol, newSL: newStopPrice, reason, orderId: result.orderId });
   return result;
@@ -477,31 +459,30 @@ export async function activateTrailingStop(symbol, interval = '15m', multiplier 
   const info = await getSymbolInfo(symbol);
 
   // Новий trailing SL
-  const trailPrice = position.side === 'LONG'
-    ? markPrice - atr * multiplier
-    : markPrice + atr * multiplier;
+  const trailPrice = calculateTrailingStop({
+    side: position.side,
+    markPrice,
+    atr,
+    multiplier,
+  });
 
   // Беремо поточний SL щоб не зрушити його назад
   const openOrders  = await getOpenOrders(symbol);
   const existingSL  = openOrders.find(o => o.type === 'STOP_MARKET' && o.reduceOnly);
   const currentSLPrice = existingSL ? parseFloat(existingSL.stopPrice) : null;
 
-  let shouldUpdate;
-  if (currentSLPrice === null) {
-    shouldUpdate = true;
-  } else if (position.side === 'LONG') {
-    shouldUpdate = trailPrice > currentSLPrice;
-  } else {
-    shouldUpdate = trailPrice < currentSLPrice;
-  }
+  const rounded = roundTrailingStop({
+    side: position.side,
+    price: trailPrice,
+    tickSize: info.tickSize,
+  });
 
+  const shouldUpdate = currentSLPrice === null ||
+    (position.side === 'LONG' ? rounded > currentSLPrice : rounded < currentSLPrice);
   if (!shouldUpdate) {
-    logger.debug('Trailing SL: no update needed', { symbol, trailPrice, currentSLPrice });
+    logger.debug('Trailing SL: no update needed', { symbol, trailPrice, rounded, currentSLPrice });
     return null;
   }
-
-  // Округлюємо до tickSize
-  const rounded = Math.round(trailPrice / info.tickSize) * info.tickSize;
 
   return updateStopLoss(symbol, rounded, `trailing_atr_x${multiplier}`);
 }
@@ -553,12 +534,11 @@ export async function earlyExit(symbol, fraction = 1) {
 // ─── Full position setup ──────────────────────────────────────────────────────
 
 /**
- * Відкрити повну позицію з TP-сіткою згідно плану:
- *   TP1 → 40% | TP2 → 30% | TP3 → 20% | TP4 → 10%
+ * Відкрити позицію із захисним SL.
+ * TP-рівні виконує positionMonitor, щоб уникнути подвійних закриттів і
+ * застосовувати momentum/fake-breakout/trailing рішення.
  *
  * SL виставляється на повний розмір позиції.
- * TP ордери — кожен на свою частку, з явним quantity (не closePosition).
- *
  * @param {object} opts
  * @param {string}   opts.symbol
  * @param {string}   opts.side         'BUY' | 'SELL'
@@ -567,7 +547,6 @@ export async function earlyExit(symbol, fraction = 1) {
  * @param {number}   [opts.entryPrice] тільки для LIMIT
  * @param {number}   opts.slPrice
  * @param {number[]} opts.tpPrices     [TP1, TP2, TP3, TP4] — від 1 до 4 рівнів
- * @param {object}   [opts.distribution]  override розподілу, default = TP_DISTRIBUTION
  */
 export async function openFullPosition({
   symbol,
@@ -577,9 +556,7 @@ export async function openFullPosition({
   entryPrice,
   slPrice,
   tpPrices = [],
-  distribution = TP_DISTRIBUTION,
 }) {
-  const info         = await getSymbolInfo(symbol);
   const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
   const results      = {};
 
@@ -613,44 +590,17 @@ export async function openFullPosition({
     quantity:  filledQuantity,
   });
 
-  // 3. Take-Profits з розподілом за планом
-  if (tpPrices.length > 0) {
-    results.tps = [];
-
-    const distKeys = Object.keys(distribution)
-      .map(Number)
-      .sort((a, b) => a - b)
-      .slice(0, tpPrices.length);
-
-    // Перевіряємо що сума часток = 1 (або близько того)
-    const totalShare = distKeys.reduce((s, k) => s + distribution[k], 0);
-
-    for (let i = 0; i < tpPrices.length; i++) {
-      const tpIndex = distKeys[i];
-      const share   = distribution[tpIndex] / totalShare; // нормалізуємо на випадок неповного набору TP
-      const tpQty   = parseFloat((filledQuantity * share).toFixed(info.quantityPrecision));
-
-      if (tpQty <= 0) {
-        logger.warn('TP qty is 0, skipping', { symbol, tpIndex, share });
-        continue;
-      }
-
-      const tp = await placeTakeProfit({
-        symbol,
-        side:      oppositeSide,
-        stopPrice: tpPrices[i],
-        quantity:  tpQty,
-      });
-      results.tps.push({ level: tpIndex, price: tpPrices[i], qty: tpQty, orderId: tp.orderId });
-    }
-  }
+  // TP exits are executed by positionMonitor. This avoids racing exchange TP orders
+  // against monitor partial closes and allows momentum/fake-breakout decisions.
+  results.tps = [];
 
   logger.info('Full position opened', {
     symbol,
     side,
     entry:  entryPrice || 'MARKET',
     sl:     slPrice,
-    tps:    results.tps?.map(t => `TP${t.level}@${t.price}(${t.qty})`),
+    tps:    tpPrices,
+    tpExecutor: 'positionMonitor',
   });
 
   return results;
@@ -673,103 +623,6 @@ async function waitForOrderFilled(symbol, orderId, timeoutMs = 120000, pollInter
   }
 
   throw new Error(`Entry order ${orderId} was not filled within ${Math.round(timeoutMs / 1000)}s`);
-}
-
-// ─── Momentum-based management ────────────────────────────────────────────────
-
-/**
- * Додаткове закриття при слабкому моментумі після TP1 (план, розділ 5).
- * Закриває +20-30% позиції замість очікування TP2.
- *
- * @param {string} symbol
- * @param {string} interval
- */
-export async function handleWeakMomentum(symbol, interval = '15m') {
-  const momentum = await getMomentum(symbol, interval);
-
-  if (momentum === 'weak') {
-    logger.info('Weak momentum detected — partial close 25%', { symbol });
-    await partialClose(symbol, 0.25, 'weak_momentum_close');
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * При сильному моментумі після TP1→TP2 — перенести частину (10-15%) з TP2 в TP3/TP4.
- * Це означає скасувати TP2-ордер і виставити менший.
- * (план, розділ 5 — логіка сильного імпульсу)
- *
- * @param {string}   symbol
- * @param {number}   tp2Price
- * @param {number}   tp3Price
- * @param {string}   interval
- */
-export async function handleStrongMomentum(symbol, tp2Price, tp3Price, interval = '15m') {
-  const momentum = await getMomentum(symbol, interval);
-  if (momentum !== 'strong') return false;
-
-  const openOrders = await getOpenOrders(symbol);
-  const tp2Order   = openOrders.find(
-    o => o.type === 'TAKE_PROFIT_MARKET' &&
-         Math.abs(parseFloat(o.stopPrice) - tp2Price) < tp2Price * 0.001
-  );
-
-  if (!tp2Order) return false;
-
-  const info          = await getSymbolInfo(symbol);
-  const originalQty   = parseFloat(tp2Order.origQty);
-  const transferShare = 0.15; // 15% переносимо вище
-  const transferQty   = parseFloat((originalQty * transferShare).toFixed(info.quantityPrecision));
-  const reducedQty    = parseFloat((originalQty - transferQty).toFixed(info.quantityPrecision));
-
-  if (transferQty <= 0 || reducedQty <= 0) return false;
-
-  logger.info('Strong momentum — reallocating TP2 → TP3', {
-    symbol, originalQty, reducedQty, transferQty,
-  });
-
-  // Скасовуємо старий TP2
-  await cancelOrder(symbol, tp2Order.orderId);
-
-  const position     = await getPosition(symbol);
-  const oppositeSide = position.side === 'LONG' ? 'SELL' : 'BUY';
-
-  // Виставляємо новий TP2 з меншим розміром
-  await placeTakeProfit({ symbol, side: oppositeSide, stopPrice: tp2Price, quantity: reducedQty });
-
-  // Додаємо до TP3
-  await placeTakeProfit({ symbol, side: oppositeSide, stopPrice: tp3Price, quantity: transferQty });
-
-  return true;
-}
-
-// ─── Fake breakout protection ─────────────────────────────────────────────────
-
-/**
- * Захист від фейкового пробою (план, розділ 7).
- * Якщо ціна повернулась до entry після TP1 — закрити ще 20-30%.
- *
- * @param {string} symbol
- */
-export async function handleFakeBreakout(symbol) {
-  const position = await getPosition(symbol);
-  if (!position) return false;
-
-  const markPrice = await getMarkPrice(symbol);
-
-  const returnedToEntry = position.side === 'LONG'
-    ? markPrice <= position.entryPrice
-    : markPrice >= position.entryPrice;
-
-  if (returnedToEntry) {
-    logger.warn('Fake breakout detected — closing 25%', { symbol, markPrice, entryPrice: position.entryPrice });
-    await partialClose(symbol, 0.25, 'fake_breakout_protection');
-    return true;
-  }
-
-  return false;
 }
 
 // ─── Leverage & margin ────────────────────────────────────────────────────────

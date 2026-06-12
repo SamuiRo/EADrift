@@ -34,7 +34,7 @@ export const EVENT_TYPES = {
 
   // Momentum
   MOMENTUM_WEAK:             'MOMENTUM_WEAK',       // extra close 25%
-  MOMENTUM_STRONG:           'MOMENTUM_STRONG',     // realloc TP2→TP3
+  MOMENTUM_STRONG:           'MOMENTUM_STRONG',     // keep runner toward TP3/trailing
 
   // Захисти
   FAKE_BREAKOUT_DETECTED:    'FAKE_BREAKOUT_DETECTED',
@@ -98,7 +98,7 @@ export default (sequelize) => sequelize.define('TradeEvent', {
   meta: {
     type:      DataTypes.JSON,
     allowNull: true,
-    comment:   'Довільний JSON — momentum value, tickCount тощо',
+    comment:   'Довільний JSON — momentum value, action тощо',
   },
 
   occurredAt: {

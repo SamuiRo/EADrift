@@ -123,7 +123,7 @@ realRiskUsdt = quantity × entryPrice × delta
 | TP1 | 40% | SL → BE+, перевірка слабкого momentum |
 | TP2 | 30% | SL → TP1, перевірка сильного momentum |
 | TP3 | 20% | SL → TP2 |
-| TP4 | 10% | увімкнути ATR trailing |
+| Останній доступний TP | 0% | залишити runner та увімкнути ATR trailing |
 
 BE+:
 
@@ -144,11 +144,12 @@ priceProtect = TRUE
 
 ## 6. Momentum
 
-Система завантажує останні 5 свічок обраного interval.
+Система використовує останню закриту свічку та порівнює її з попередніми п'ятьма
+закритими свічками. Поточна незакрита свічка не входить у розрахунок.
 
 ```text
-avgVolume = average(volume[5])
-avgRange  = average(high - low)
+avgVolume = average(previous closed volume[5])
+avgRange  = average(previous closed high - low[5])
 
 volumeStrong = lastVolume > avgVolume × 1.3
 rangeStrong  = lastRange  > avgRange  × 1.2
@@ -156,13 +157,13 @@ rangeStrong  = lastRange  > avgRange  × 1.2
 
 Результат:
 
-- `strong`, якщо одночасно сильні volume і range;
-- `weak`, якщо volume не сильний і `lastVolume < avgVolume × 0.7`;
+- `strong`, якщо одночасно сильні volume/range і напрям свічки збігається з позицією;
+- `weak`, якщо напрям свічки протилежний позиції або обсяг нижче `avgVolume × 0.7`;
 - інакше `neutral`.
 
 Після TP1 слабкий momentum закриває додатково 25% від поточної позиції.
 
-Після TP2 сильний momentum намагається перенести 15% кількості TP2-ордера до TP3: старий TP2 скасовується, після чого створюються зменшений TP2 і додатковий TP3.
+Після TP2 сильний momentum підтверджує утримання runner до TP3/trailing.
 
 ## 7. Fake breakout
 
@@ -177,7 +178,8 @@ SHORT: markPrice >= entryPrice
 
 ## 8. ATR trailing
 
-ATR рахується за 14 періодами з 15 свічок:
+ATR рахується за 14 періодами з 15 закритих свічок. Поточна незакрита свічка
+не використовується:
 
 ```text
 TR = max(
@@ -189,7 +191,7 @@ TR = max(
 ATR = average(TR)
 ```
 
-Після TP4:
+Після останнього доступного TP:
 
 ```text
 LONG:  trailPrice = markPrice - ATR × 1.5
@@ -200,13 +202,15 @@ SL рухається лише в бік прибутку та округлює�
 
 ## 9. Timeout / early exit
 
-За замовчуванням `executeOrder()` передає `timeoutCandles = 12`. Реальна реалізація збільшує лічильник на кожному monitor tick, доки TP1 не досягнутий.
+За замовчуванням `executeOrder()` передає `timeoutCandles = 12`. Timeout рахується
+за тривалістю timeframe сигналу, доки TP1 не досягнутий.
 
 ```text
-approxTimeoutSeconds = timeoutCandles × MONITOR_INTERVAL_MS / 1000
+timeoutAt = entryTime + timeoutCandles × intervalDuration
 ```
 
-За типового interval 5000 мс це приблизно 60 секунд, а не 12 свічок обраного timeframe. Після досягнення ліміту позиція закривається повністю з причиною `early_exit_timeout`.
+Наприклад, `12 × 1h` означає timeout приблизно через 12 годин. Після досягнення
+ліміту позиція закривається повністю з причиною `early_exit_timeout`.
 
 ## 10. Аналітичні метрики
 
@@ -226,4 +230,3 @@ profitR   = profitUsdt / riskPerTradeUsdt
 profitPct = profitUsdt / positionUsdt × 100
 timeInTradeMs = closedAt - openedAt
 ```
-

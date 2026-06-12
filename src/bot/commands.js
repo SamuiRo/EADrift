@@ -340,8 +340,8 @@ async function handleWatch(msg) {
     }).join('\n');
 
     const trailing = m.trailingActive ? '\n  🔄 Trailing активний' : '';
-    const timeout  = m.tickCount > 0
-      ? `\n  ⏱ Тіків без руху: ${m.tickCount}`
+    const timeout  = m.timeoutCandles > 0
+      ? `\n  ⏱ Timeout до TP1: ${m.timeoutCandles} × ${m.interval}`
       : '';
 
     return (

@@ -97,7 +97,8 @@ SL/TP/R:R/slippage, перераховує risk та відхиляє сигна
 1. Виставляє MARKET або LIMIT entry.
 2. Для LIMIT чекає статус `FILLED`, polling кожні 1.5 секунди, максимум 120 секунд.
 3. Виставляє STOP_MARKET на всю виконану кількість.
-4. Виставляє TAKE_PROFIT_MARKET ордери за TP-розподілом.
+4. Передає TP-виконання position monitor-у. Біржові TP-ордери не створюються, щоб
+   уникнути подвійного закриття та дозволити momentum/fake-breakout/trailing рішення.
 
 Якщо TP-рівнів менше чотирьох, частки нормалізуються до 100% на наявні рівні.
 
@@ -122,7 +123,7 @@ flowchart TD
     P -->|TP1| P1["Close 40% -> SL BE+ -> momentum"]
     P -->|TP2| P2["Close 30% -> SL TP1 -> momentum"]
     P -->|TP3| P3["Close 20% -> SL TP2"]
-    P -->|TP4| P4["Close 10% -> trailing active"]
+    P -->|TP4| P4["Keep runner -> trailing active"]
     P -->|TP1 not hit| TO["Increment timeout tick"]
     P1 --> FB["Check fake breakout"]
     P2 --> FB
@@ -132,6 +133,10 @@ flowchart TD
 
 TP-рівні перевіряються послідовно. Якщо нижчий ще не досягнутий, вищі в цьому tick не обробляються.
 
+TP1/TP2/TP3 закривають відповідно 40%/30%/20% початкової позиції через частки
+від поточного залишку. Останній доступний TP не закриває runner, а активує ATR trailing.
+Для стандартних чотирьох TP runner становить приблизно 10% початкової позиції.
+
 ## 6. Відновлення після рестарту
 
 `restoreWatchlistFromDB()` читає угоди зі статусом `OPEN` або `PARTIALLY_CLOSED` та звіряє їх із Binance:
@@ -139,7 +144,7 @@ TP-рівні перевіряються послідовно. Якщо нижч
 - якщо позиція існує, watchlist відновлюється з TP flags і останнім SL;
 - якщо позиції немає, trade закривається як `manual` з note `Closed while bot was offline`;
 - `timeoutCandles` після рестарту встановлюється в `0`;
-- `trailingActive` після рестарту встановлюється в `false`.
+- `trailingActive` відновлюється, якщо останній доступний TP уже був досягнутий.
 
 Відновлення не створює повторний `TRADE_OPENED`.
 

@@ -27,9 +27,12 @@ erDiagram
 Життєвий цикл:
 
 ```text
-PENDING -> TRADED | REJECTED | EXPIRED | CANCELLED
+PENDING -> TRADED | REJECTED | FAILED | EXPIRED | CANCELLED
 PAUSED  створюється як PENDING і одразу оновлюється до PAUSED
 ```
+
+`FAILED` означає, що сигнал був підтверджений або обраний для автовиконання,
+але створення позиції завершилося помилкою.
 
 ## `trades`
 

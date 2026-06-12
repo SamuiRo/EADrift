@@ -1,7 +1,7 @@
 import winston from 'winston';
-import { LOG_LEVEL } from "../config/app.config.js"
 
 const { combine, timestamp, printf, colorize } = winston.format;
+const logLevel = process.env.LOG_LEVEL || 'info';
 
 const logFormat = printf(({ level, message, timestamp, ...meta }) => {
     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
@@ -9,7 +9,7 @@ const logFormat = printf(({ level, message, timestamp, ...meta }) => {
 });
 
 export const logger = winston.createLogger({
-    level: LOG_LEVEL,
+    level: logLevel,
     format: combine(
         timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
         logFormat

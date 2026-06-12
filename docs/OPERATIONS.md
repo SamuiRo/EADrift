@@ -48,6 +48,7 @@ npm run dev
 |---|---:|---|
 | `BINANCE_TESTNET` | `false` | `true` перемикає REST base URL на testnet |
 | `MONITOR_INTERVAL_MS` | `5000` | інтервал position monitor |
+| `CONFIRM_MAX_PRICE_MOVE_PCT` | `0.005` | максимальна зміна ціни між оцінкою та підтвердженням; `0.005` = 0.5% |
 | `LOG_LEVEL` | `info` | рівень Winston; `debug` також вмикає SQL logs |
 | `NODE_ENV` | немає | експортується, але логіку не змінює |
 | `DEFAULT_POSITION_SIZE_USDT` | `"20"` | експортується, але зараз не використовується |
@@ -57,6 +58,9 @@ npm run dev
 ## Telegram-команди
 
 Усі команди доступні лише для `TELEGRAM_ADMIN_CHAT_ID`.
+
+Крім команд, адміністратор може надіслати або переслати текст торгового сигналу
+безпосередньо боту. Бот оцінить сигнал і покаже клавіатуру Confirm/Cancel.
 
 | Команда | Дія |
 |---|---|
@@ -122,4 +126,3 @@ BINANCE_TESTNET=true
 5. Перевірити `REJECT`, `CONFIRM`, cancel і expiry.
 6. Перезапустити бот із відкритою позицією та перевірити restore.
 7. Перевірити записи `signals`, `trades`, `trade_events`, `sl_history`.
-

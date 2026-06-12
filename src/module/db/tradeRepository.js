@@ -59,7 +59,7 @@ export async function saveSignal(parsed, priceAtSignal = null) {
  * Оновити статус сигналу після рішення confirmation.js
  *
  * @param {number} signalDbId  — signal.id з БД
- * @param {'TRADED'|'REJECTED'|'EXPIRED'|'CANCELLED'|'PAUSED'} status
+ * @param {'TRADED'|'REJECTED'|'FAILED'|'EXPIRED'|'CANCELLED'|'PAUSED'} status
  * @param {string} [rejectReason]
  */
 export async function updateSignalStatus(signalDbId, status, rejectReason = null) {

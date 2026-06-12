@@ -126,6 +126,7 @@ export function parseSignal(text) {
       trendLine: trendlineMatch ? parseFloat(trendlineMatch[1]) : null,
       accuracy:  accuracyMatch  ? parseFloat(accuracyMatch[1])  : null,
       signalId:  idMatch ? idMatch[1] : null,
+      rawText:   trimmed,
     };
   }
 

@@ -42,6 +42,7 @@ import {
   TRADING_MODES, MODE_LABELS,
 } from '../core/tradingMode.js';
 import { logger } from '../shared/logger.js';
+import { CONFIRM_MAX_PRICE_MOVE_PCT } from '../config/app.config.js';
 import {
   saveSignal,
   updateSignalStatus,
@@ -55,7 +56,9 @@ const REMINDER_BEFORE_MS =  5 * 60 * 1000; // нагадування за 5 хв
 
 const TP_DISTRIBUTION = { 1: 40, 2: 30, 3: 20, 4: 10 };
 
-// confirmId → { order, risk, marketEntry, messageId, expiresAt, resolved, reminderTimer, expireTimer }
+class ConfirmationRejectedError extends Error {}
+
+// confirmId → { order, risk, marketEntry, evaluationPrice, messageId, expiresAt, resolved, timers }
 const pending = new Map();
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -111,6 +114,17 @@ export async function requestConfirmation(order) {
 
   // Прикріплюємо id до order для передачі в executeOrder і pending
   order = { ...order, _signalDbId: signalRecord?.id ?? null };
+
+  if (!order.tpPrices?.length) {
+    const reason = 'Signal has no take-profit levels';
+    await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
+    await sendMarkdown(
+      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
+      `*Причина:* ${reason}\n\n` +
+      `_Ордер не виставлено_`
+    );
+    return null;
+  }
 
   // ── Визначаємо ефективну ціну входу ──────────────────────────────────────
   // Якщо є зона — перевіряємо чи ціна в ній, інакше — market за поточною
@@ -230,6 +244,7 @@ export function registerConfirmationHandler() {
   const bot = getBot();
   bot.on('callback_query', async (query) => {
     if (!query.data) return;
+    if (String(query.message?.chat?.id) !== String(ADMIN_CHAT_ID)) return;
     const [action, confirmId] = query.data.split(':');
     if (!['confirm', 'cancel'].includes(action)) return;
     await answerCallback(query.id);
@@ -256,6 +271,7 @@ async function showConfirmCard(order, risk, marketEntry, currentPrice, balance) 
   // Зберігаємо balance щоб передати в executeOrder при підтвердженні
   pending.set(confirmId, {
     order, risk, marketEntry, balance,
+    evaluationPrice: currentPrice,
     messageId: sentMsg.message_id,
     expiresAt, resolved: false, reminderTimer, expireTimer,
   });
@@ -422,28 +438,110 @@ async function handleCallback(action, confirmId, callbackMsg) {
   if (action === 'cancel') {
     await editMessage(callbackMsg.chat.id, callbackMsg.message_id,
       `_✗ Ордер ${entry.order.symbol} скасовано_`, { parse_mode: 'Markdown' });
-    await updateSignalStatus(entry.order._signalDbId, 'CANCELLED');
+    await updateSignalStatus(entry.order._signalDbId, 'CANCELLED', 'Cancelled by user');
     pending.delete(confirmId);
     logger.info('Order cancelled by user', { confirmId });
     return;
   }
 
   await editMessage(callbackMsg.chat.id, callbackMsg.message_id,
-    `_⏳ ${entry.order.symbol} — виконується..._`, { parse_mode: 'Markdown' });
+    `_⏳ ${entry.order.symbol} — повторна перевірка..._`, { parse_mode: 'Markdown' });
 
   try {
-    const result = await executeOrder(entry.order, entry.risk, entry.balance);
+    const checked = await recheckBeforeExecution(entry);
+    const result = await executeOrder(checked.order, checked.risk, checked.balance);
     await editMessage(callbackMsg.chat.id, callbackMsg.message_id,
       `_✅ ${entry.order.symbol} — виконано_\norderId: \`${result.entry.orderId}\``,
       { parse_mode: 'Markdown' });
     logger.info('Order executed', { confirmId, orderId: result.entry.orderId });
   } catch (err) {
+    const status = err instanceof ConfirmationRejectedError ? 'REJECTED' : 'FAILED';
+    await updateSignalStatus(
+      entry.order._signalDbId,
+      status,
+      `${status === 'REJECTED' ? 'Confirmation recheck rejected' : 'Confirmed order failed'}: ${err.message}`
+    );
     await editMessage(callbackMsg.chat.id, callbackMsg.message_id,
-      `_❌ ${entry.order.symbol} — помилка: ${err.message}_`, { parse_mode: 'Markdown' });
+      `_❌ ${entry.order.symbol} — відхилено після перевірки: ${err.message}_`,
+      { parse_mode: 'Markdown' });
     logger.error('Order execution failed', { confirmId, err: err.message });
   }
 
   pending.delete(confirmId);
+}
+
+async function recheckBeforeExecution(entry) {
+  const [priceResult, balanceResult] = await Promise.allSettled([
+    getMarkPrice(entry.order.symbol),
+    getUSDTBalance(),
+  ]);
+
+  if (priceResult.status !== 'fulfilled' || !Number.isFinite(priceResult.value)) {
+    throw new ConfirmationRejectedError('Could not fetch current mark price');
+  }
+
+  const currentPrice = priceResult.value;
+  const balance = balanceResult.status === 'fulfilled' ? balanceResult.value : null;
+  const evaluationPrice = entry.evaluationPrice;
+
+  if (evaluationPrice) {
+    const movePct = Math.abs(currentPrice - evaluationPrice) / evaluationPrice;
+    if (movePct > CONFIRM_MAX_PRICE_MOVE_PCT) {
+      throw new ConfirmationRejectedError(
+        `Price moved ${(movePct * 100).toFixed(2)}% since evaluation ` +
+        `(max ${(CONFIRM_MAX_PRICE_MOVE_PCT * 100).toFixed(2)}%)`
+      );
+    }
+  }
+
+  let order = { ...entry.order };
+
+  if (order.tpPrices?.length > 0) {
+    const marketEntry = validateMarketEntry({
+      currentPrice,
+      slPrice: order.slPrice,
+      tp1Price: order.tpPrices[0],
+      entryLow: order.entryLow ?? order.entryPrice ?? currentPrice,
+      entryHigh: order.entryHigh ?? order.entryPrice ?? currentPrice,
+      side: order.side,
+    });
+
+    if (!marketEntry.valid) {
+      throw new ConfirmationRejectedError(marketEntry.reason);
+    }
+
+    if (!marketEntry.inZone || order.entryType === 'MARKET') {
+      order = { ...order, entryType: 'MARKET', entryPrice: currentPrice };
+    }
+  }
+
+  const effectiveEntry = order.entryType === 'MARKET' ? currentPrice : order.entryPrice;
+  const risk = await calcFromBalance({
+    entryPrice: effectiveEntry,
+    slPrice: order.slPrice,
+    symbol: order.symbol,
+    balance: balance?.available ?? null,
+  });
+
+  if (!risk || risk.status === VALIDATION.REJECT) {
+    throw new ConfirmationRejectedError(
+      risk?.reason ?? 'Risk calculation failed during confirmation recheck'
+    );
+  }
+
+  logger.info('Confirmation recheck passed', {
+    symbol: order.symbol,
+    evaluationPrice,
+    currentPrice,
+    entryType: order.entryType,
+    riskStatus: risk.status,
+  });
+
+  return {
+    order: { ...order, quantity: risk.quantity },
+    risk,
+    balance,
+  };
 }
 
 // ─── Execute ──────────────────────────────────────────────────────────────────
@@ -542,6 +640,11 @@ async function executeAndNotify(order, risk, balance = null) {
     );
     logger.info('Auto-executed', { symbol: order.symbol, mode, orderId: result.entry.orderId });
   } catch (err) {
+    await updateSignalStatus(
+      order._signalDbId,
+      'FAILED',
+      `Automatic execution failed: ${err.message}`
+    );
     await sendMarkdown(`❌ *${order.symbol}* — помилка автовиконання\n\`${err.message}\``);
     logger.error('Auto-execute failed', { symbol: order.symbol, err: err.message });
   }
@@ -576,7 +679,7 @@ async function expirePending(confirmId) {
     parse_mode: 'Markdown',
   }).catch(() => {});
 
-  await updateSignalStatus(entry.order._signalDbId, 'EXPIRED');
+  await updateSignalStatus(entry.order._signalDbId, 'EXPIRED', 'Confirmation expired');
 
   await sendMarkdown(
     `⌛ *${entry.order.symbol}* — підтвердження протухло\n` +

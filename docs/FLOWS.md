@@ -22,6 +22,7 @@
 flowchart TD
     A["NewMessage event"] --> B["Deduplicate by message ID"]
     P["Fallback ping every 4 min"] --> B
+    M["Admin sends or forwards signal to bot"] --> C
     B --> C["parseSignal(text)"]
     C -->|SIGNAL| D["index -> requestConfirmation"]
     C -->|REPORT| E["Log report only"]
@@ -33,6 +34,10 @@ Parser розпізнає:
 - `SIGNAL`: symbol, LONG/SHORT, timeframe, entry zone, TP-масив, SL, trend line, accuracy, signal ID;
 - `REPORT`: symbol, optional side, signal ID і raw text;
 - інший текст повертає `null`.
+
+Адміністратор також може надіслати або переслати текст сигналу безпосередньо боту.
+Повідомлення з приватного адмін-чату проходить той самий parser, market validation,
+risk calculation та confirmation flow, що й сигнал із каналу.
 
 Для entry zone parser очікує формат `Entry Zone: HIGH - LOW`: перше число записується як `entryHigh`, друге як `entryLow`.
 
@@ -56,7 +61,9 @@ flowchart TD
     H -->|"SEMI_AUTO + risk OK + in zone"| X
     H -->|SEMI_AUTO otherwise| K["Confirmation card"]
     H -->|CONFIRM_ONLY| K
-    K -->|confirm| X
+    K -->|confirm| Q["Fetch fresh price + balance; repeat market/risk checks"]
+    Q -->|valid and price move within limit| X
+    Q -->|invalid or price moved too far| R3["Signal REJECTED"]
     K -->|cancel| C1["Signal CANCELLED"]
     K -->|30 min TTL| E1["Signal EXPIRED"]
 ```
@@ -69,6 +76,10 @@ flowchart TD
 4. R:R від поточної ціни до TP1 не нижчий за 1.5.
 
 Картка підтвердження живе 30 хвилин; за 5 хвилин до завершення надсилається нагадування.
+
+Після натискання Confirm система повторно отримує mark price і баланс, перевіряє
+SL/TP/R:R/slippage, перераховує risk та відхиляє сигнал, якщо ціна змінилася від
+моменту первинної оцінки більше ніж `CONFIRM_MAX_PRICE_MOVE_PCT` (типово `0.005`, тобто 0.5%).
 
 ## 4. Виконання угоди
 
@@ -139,4 +150,3 @@ TP-рівні перевіряються послідовно. Якщо нижч
 - `/close SYMBOL FRACTION` виконує reduce-only MARKET close.
 - `/cancel` і `/cancelall` скасовують ордери, але не змінюють watchlist або БД.
 - `/mode` змінює режим лише до наступного рестарту.
-

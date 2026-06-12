@@ -14,6 +14,10 @@ export const TELEGRAM_API_ID           = +process.env.TELEGRAM_API_ID;
 export const TELEGRAM_API_HASH         = process.env.TELEGRAM_API_HASH;
 export const TELEGRAM_SESSION_STRING   = process.env.TELEGRAM_SESSION_STRING || '';
 export const MONITOR_INTERVAL_MS       = parseInt(process.env.MONITOR_INTERVAL_MS || '5000');
+const confirmMaxPriceMovePct           = parseFloat(process.env.CONFIRM_MAX_PRICE_MOVE_PCT || '0.005');
+export const CONFIRM_MAX_PRICE_MOVE_PCT = Number.isFinite(confirmMaxPriceMovePct) && confirmMaxPriceMovePct >= 0
+  ? confirmMaxPriceMovePct
+  : 0.005;
 export const LOG_LEVEL                 = process.env.LOG_LEVEL || 'info';
 export const APP_VERSION               = pkg.version;
 export const PKG               = pkg;

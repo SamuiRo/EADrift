@@ -69,10 +69,10 @@ export default (sequelize) => sequelize.define('Signal', {
 
   // Результат обробки сигналу
   status: {
-    type:         DataTypes.ENUM('PENDING', 'TRADED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'PAUSED'),
+    type:         DataTypes.ENUM('PENDING', 'TRADED', 'REJECTED', 'FAILED', 'EXPIRED', 'CANCELLED', 'PAUSED'),
     allowNull:    false,
     defaultValue: 'PENDING',
-    comment:      'TRADED=відкрита угода, REJECTED=не пройшов перевірку, EXPIRED=TTL вийшов',
+    comment:      'TRADED=відкрита угода, REJECTED=не пройшов перевірку, FAILED=помилка виконання',
   },
 
   rejectReason: {

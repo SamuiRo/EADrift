@@ -1,7 +1,8 @@
 import { logger } from './shared/logger.js';
 import { initBot, sendMarkdown, telegramNotify } from './bot/telegram.js';
 import { registerCommands } from './bot/commands.js';
-import { registerConfirmationHandler, requestConfirmation } from './bot/confirmation.js';
+import { registerConfirmationHandler } from './bot/confirmation.js';
+import { handleParsedSignal, registerAdminSignalIntake } from './bot/signalIntake.js';
 import { startMonitor, setNotifier, restoreWatchlistFromDB } from './core/positionMonitor.js';
 import { TelegramSourceListener } from './sources/telegram/TelegramSourceListener.js';
 import {
@@ -28,6 +29,7 @@ class Drift {
       initBot();
       registerCommands();
       registerConfirmationHandler();
+      registerAdminSignalIntake();
 
       // 2. Position monitor → Telegram notifier
       setNotifier(telegramNotify);
@@ -44,35 +46,7 @@ class Drift {
         const listener = new TelegramSourceListener(
           TELEGRAM_SIGNAL_CHANNEL_ID,
           async (signal) => {
-            if (signal.type === 'REPORT') {
-              logger.info('Signal report received', {
-                symbol:   signal.symbol,
-                signalId: signal.signalId,
-              });
-              return;
-            }
-
-            // signal.type === 'SIGNAL'
-            logger.info('New signal received, requesting confirmation', {
-              symbol: signal.symbol,
-              side:   signal.side,
-            });
-
-            await requestConfirmation({
-              symbol:     signal.symbol,
-              side:       signal.side === 'LONG' ? 'BUY' : 'SELL',
-              entryType:  'LIMIT',
-              entryPrice: signal.entryMid,
-              entryLow:   signal.entryLow,
-              entryHigh:  signal.entryHigh,
-              slPrice:    signal.slPrice,
-              tpPrices:   signal.tpPrices,
-              interval:   signal.timeframe ?? '1h',
-              // Передаємо сирі дані для saveSignal
-              signalId:   signal.signalId,
-              accuracy:   signal.accuracy,
-              rawText:    signal.rawText,
-            });
+            await handleParsedSignal(signal, { source: 'channel' });
           },
         );
 

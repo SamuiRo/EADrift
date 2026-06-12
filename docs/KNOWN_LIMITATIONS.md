@@ -65,7 +65,6 @@ Sequelize налаштований з `underscored: false`, моделі маю�
 
 - entry zone очікується як `HIGH - LOW`;
 - маркери SIGNAL/REPORT та LONG/SHORT залежать від конкретних emoji;
-- для `SIGNAL` parser зараз не повертає `rawText`, тому поле в БД буде `null`;
 - немає schema validation результату parser-а;
 - немає тестів на варіації форматування.
 

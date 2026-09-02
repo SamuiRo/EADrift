@@ -31,6 +31,7 @@ export async function saveSignal(parsed, priceAtSignal = null) {
   try {
     const signal = await Signal.create({
       signalId:      parsed.signalId   ?? null,
+      source:        parsed.source     ?? 'unknown',
       symbol:        parsed.symbol,
       side:          parsed.side === 'BUY' ? 'LONG' : parsed.side === 'SELL' ? 'SHORT' : parsed.side,
       entryLow:      parsed.entryLow   ?? null,

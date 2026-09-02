@@ -29,6 +29,7 @@ import {
 import { getWatchlist, updateWatchedSL } from '../core/positionMonitor.js';
 import { getMode, setMode, TRADING_MODES, MODE_LABELS } from '../core/tradingMode.js';
 import { RISK_CONFIG } from '../core/riskEngine.js';
+import { normalizedTpShares } from '../core/exitStrategy.js';
 import { logger } from '../shared/logger.js';
 
 // ─── Register ─────────────────────────────────────────────────────────────────
@@ -116,6 +117,11 @@ async function handleStatus(msg) {
     `Ризик/угода : \`${(RISK_CONFIG.riskPct * 100).toFixed(2)}%\``,
     `Макс плече  : \`${RISK_CONFIG.maxLeverage}x\``,
     `SL діапазон : \`${(RISK_CONFIG.minDeltaPct * 100).toFixed(1)}% – ${(RISK_CONFIG.maxDeltaPct * 100).toFixed(1)}%\``,
+    ``,
+    `*Вихід:*`,
+    `Власний SL  : \`R:R ${RISK_CONFIG.targetRR} до TP1, підлога ${RISK_CONFIG.atrStopMultiplier}×ATR\``,
+    `Поріг угоди : \`зважений R:R ≥ ${RISK_CONFIG.minWeightedRR}\``,
+    `Сітка TP    : \`${normalizedTpShares(4).map(s => `${Math.round(s * 100)}%`).join(' / ')}\``,
   ].join('\n');
 
   await sendMarkdown(text);

@@ -44,18 +44,30 @@ partial close потрібен `syncProtectiveOrders(symbol)` для переб�
 
 Потрібен reconciliation flow на основі positions, open orders та income/order history.
 
-### 6. Analytics raw SQL, імовірно, використовує неправильні назви колонок
+### 6. Analytics raw SQL використовує неправильні назви колонок
 
-Sequelize налаштований з `underscored: false`, моделі мають camelCase поля, але raw SQL у `analytics.js` звертається до `entry_price`, `profit_r`, `trade_id` тощо.
+Підтверджено звіркою з фактичною схемою: колонки в SQLite camelCase
+(`entryPrice`, `profitR`, `tradeId`), а raw SQL у `analytics.js` звертається до
+`entry_price`, `profit_r`, `trade_id`. Кожен звіт на raw SQL кидає помилку при
+першому виклику.
 
-Потрібно звірити фактичну SQLite schema та уніфікувати mapping. Аналітичні функції також не мають CLI/API/Telegram entry point.
+Потрібно уніфікувати mapping. Аналітичні функції також не мають CLI/API/Telegram entry point.
 
 ### 7. Signal parser жорстко прив'язаний до формату каналу
 
-- entry zone очікується як `HIGH - LOW`;
+Виправлено частково:
+
+- межі entry zone тепер визначаються за значенням, тому обидва порядки запису
+  читаються коректно;
+- таймфрейм нормалізується до валідного інтервалу Binance (`30` → `30m`);
+- результат парсера проходить `validateGeometry()` зі схемою на `zod`;
+- є тести на обидва формати зони та на нормалізацію таймфрейму.
+
+Лишається:
+
 - маркери SIGNAL/REPORT та LONG/SHORT залежать від конкретних emoji;
-- немає schema validation результату parser-а;
-- немає тестів на варіації форматування.
+- джерела з принципово іншою розміткою потребують окремого парсера
+  (планується LLM-нормалізатор із перевіркою чисел через `verifyNumbersInSource()`).
 
 ## Низький пріоритет / архітектурні межі
 
@@ -78,27 +90,48 @@ Watchlist має тип `Map<symbol, meta>`. Це відповідає Binance o
 type checking, CI workflow або Binance integration-тестів. Біржові зміни потребують
 ручної перевірки на testnet.
 
-### 11. Немає керованих міграцій БД
+### 11. Міграції БД мінімальні
 
-`db.sync({ alter: false })` не оновить існуючу schema після зміни моделі. Потрібні versioned migrations і backup policy.
+`runColumnMigrations()` додає відсутні колонки (`ALTER TABLE ... ADD COLUMN`)
+ідемпотентно перед sync. Цього достатньо для додавання полів, але не для зміни
+типів, перейменувань чи видалення. Versioned migrations і backup policy
+досі потрібні.
 
 ### 12. `.env.example` містить placeholder credentials
 
 Шаблон містить перелік змінних, але placeholder credentials легко сплутати з
 реальними значеннями. `DEFAULT_POSITION_SIZE_USDT` і `NODE_ENV` зараз не впливають на поведінку.
 
-### 13. Частина залежностей і shared helpers не використовується основним flow
+### 13. `maxLeverage` наразі недосяжний
+
+`leverage = riskPct / delta`, тобто депозит на плече не впливає. За поточних
+`riskPct = 0.75%` і `minDeltaPct = 0.2%` стеля становить `3.75x`, тому
+`maxLeverage = 10` не обмежує жодного сигналу. Це не помилка, але про це варто
+памʼятати при зміні `riskPct`.
+
+### 14. Калібрування виходу підігнане під одне джерело
+
+`targetRR`, `atrStopMultiplier`, `minWeightedRR` і сітка TP підібрані на вибірці
+з шести сигналів одного провайдера. Це напрямок, а не встановлені параметри.
+Поле `signals.source` додане, щоб статистику можна було рахувати окремо по
+кожному джерелу, але окремих конфігів на джерело ще немає.
+
+### 15. Частина залежностей і shared helpers не використовується основним flow
 
 Наприклад, `@binance/connector`, `node-cron`, `zod`, image helpers і деякі exchange helper-функції не задіяні в основному runtime. Це збільшує поверхню підтримки.
 
-### 14. README у корені частково застарілий
+### 16. `zod` використовується лише частково
 
-Він згадує відсутній `orderWizard.js`, стару структуру та приклад `watchPosition()` з `tpLevels`, тоді як реалізація очікує `tpPrices`. Актуальна технічна документація міститься в `docs/`.
+Пакет був у залежностях невикористаним; тепер на ньому побудована схема в
+`signalGeometry.js`. Решта межі даних — конфіг, відповіді Binance, поля з БД —
+досі не валідуються, хоча інструмент уже в проєкті.
 
 ## Рекомендований порядок покращень
 
-1. Додати reconciliation/sync protective orders після ручних змін позиції.
-2. Виправити LIMIT timeout із гарантованим cancel.
-3. Додати integration-тести Binance adapter з mocks і testnet smoke-test.
-4. Додати migrations, schema check та перевірити analytics SQL.
-5. Персистити runtime mode/trailing state, якщо це потрібно операційно.
+1. Реєстратор для збору статистики: режим, що проганяє весь конвеєр і логує
+   рішення, але не шле ордери.
+2. Виправити analytics SQL — зараз усі raw-SQL звіти непрацездатні.
+3. Додати reconciliation/sync protective orders після ручних змін позиції.
+4. Виправити LIMIT timeout із гарантованим cancel.
+5. Додати integration-тести Binance adapter з mocks і testnet smoke-test.
+6. Персистити runtime mode/trailing state, якщо це потрібно операційно.

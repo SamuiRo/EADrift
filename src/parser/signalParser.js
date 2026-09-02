@@ -32,6 +32,36 @@ function midpoint(a, b) {
   return parseFloat(((a + b) / 2).toFixed(10));
 }
 
+const BINANCE_INTERVALS = new Set([
+  '1m', '3m', '5m', '15m', '30m',
+  '1h', '2h', '4h', '6h', '8h', '12h',
+  '1d', '3d', '1w', '1M',
+]);
+
+/** Голе число хвилин → інтервал Binance. Канал пише і "30m", і просто "30". */
+const BARE_MINUTES = {
+  1: '1m', 3: '3m', 5: '5m', 15: '15m', 30: '30m',
+  60: '1h', 120: '2h', 240: '4h', 360: '6h', 480: '8h', 720: '12h', 1440: '1d',
+};
+
+/**
+ * Звести таймфрейм із тексту сигналу до валідного інтервалу Binance.
+ * Невпізнане повертає null — далі спрацює дефолт викликача.
+ */
+function normalizeInterval(raw) {
+  if (!raw) return null;
+
+  const value = String(raw).trim();
+  if (BINANCE_INTERVALS.has(value)) return value;
+
+  const lower = value.toLowerCase();
+  if (BINANCE_INTERVALS.has(lower)) return lower;
+
+  if (/^\d+$/.test(lower)) return BARE_MINUTES[Number(lower)] ?? null;
+
+  return null;
+}
+
 // ─── Основна функція ─────────────────────────────────────────────────────────
 
 /**
@@ -110,14 +140,19 @@ export function parseSignal(text) {
       tpPrices.push(parseFloat(m[1]));
     }
 
-    const entryHigh = parseFloat(entryMatch[1]);
-    const entryLow  = parseFloat(entryMatch[2]);
+    // Джерела пишуть зону в обох порядках: GGShøt дає "LOW - HIGH",
+    // старіший формат каналу давав "HIGH - LOW". Позиція в рядку нічого не
+    // гарантує, тому межі визначаємо за значенням.
+    const boundA    = parseFloat(entryMatch[1]);
+    const boundB    = parseFloat(entryMatch[2]);
+    const entryLow  = Math.min(boundA, boundB);
+    const entryHigh = Math.max(boundA, boundB);
 
     return {
       type:      'SIGNAL',
       symbol:    symbolMatch[1].toUpperCase(),
       side:      sideMatch[1] ? 'LONG' : 'SHORT',
-      timeframe: tfMatch ? tfMatch[1] : null,
+      timeframe: normalizeInterval(tfMatch?.[1]),
       entryHigh,
       entryLow,
       entryMid:  midpoint(entryHigh, entryLow),

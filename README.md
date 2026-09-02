@@ -32,12 +32,18 @@ BINANCE_TESTNET=true
 ```text
 Telegram channel
   -> signal parser
-  -> market/risk validation
+  -> geometry validation (схема, взаємне розташування SL / зони / TP)
+  -> market validation + власний SL + зважений R:R
   -> auto execution або admin confirmation
   -> Binance entry + SL + TP
   -> position monitor
   -> SQLite history та Telegram notifications
 ```
+
+Stop-loss розраховується самостійно від фактичної ціни входу, а не береться з
+сигналу: SL провайдера відкалібровано під вхід по середині зони набору й при
+пізнішому вході дає надто несиметричний ризик. Деталі — в
+[торговій стратегії](./docs/TRADING_STRATEGY.md).
 
 Після кожного запуску торговий режим за замовчуванням — `CONFIRM_ONLY`.
 

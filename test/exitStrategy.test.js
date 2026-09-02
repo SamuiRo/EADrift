@@ -13,16 +13,41 @@ import {
   updateReversalState,
 } from '../src/core/exitStrategy.js';
 
-test('TP distribution is 45/35/15/5 and normalizes incomplete signals', () => {
-  assert.deepEqual(normalizedTpShares(4), [0.45, 0.35, 0.15, 0.05]);
+test('TP distribution is 40/40/20 and normalizes incomplete signals', () => {
+  // TP4 має нульову частку: на перевіреній вибірці він не спрацював жодного
+  // разу, тоді як TP2 бере половину сигналів.
+  assert.deepEqual(normalizedTpShares(4), [0.40, 0.40, 0.20, 0]);
   assert.ok(Math.abs(expectedRemainingAfterTp(2, 100) - 20) < 1e-12);
-  assert.ok(Math.abs(normalizedTpShares(2)[0] - 0.5625) < 1e-12);
-  assert.deepEqual(allocateTpQuantities(1, 3, 4), [0.45, 0.35, 0.15, 0.05]);
+
+  // Сигнал із двома цілями: частки нормалізуються на наявні рівні.
+  assert.ok(Math.abs(normalizedTpShares(2)[0] - 0.5) < 1e-12);
+
+  assert.deepEqual(allocateTpQuantities(1, 3, 4), [0.40, 0.40, 0.20, 0]);
   assert.equal(allocateTpQuantities(0.007, 3, 4).reduce((sum, qty) => sum + qty, 0), 0.007);
   assert.deepEqual(
     allocateTpQuantities(0.55, 3, 3, [0.35, 0.15, 0.05]),
     [0.35, 0.15, 0.05],
   );
+});
+
+test('a zero-share level never receives the rounding remainder', () => {
+  // Регресія: залишок від округлення діставався останньому елементу масиву.
+  // З часткою 0 на TP4 це виставляло б на біржі зайвий мікроордер.
+  const precision = 3;
+  const step = 10 ** -precision;
+
+  for (const qty of [0.007, 1, 0.33333, 12.5]) {
+    const allocated = allocateTpQuantities(qty, precision, 4);
+    assert.equal(allocated[3], 0, `TP4 must stay empty for quantity ${qty}`);
+
+    // Сума збігається з кількістю в межах одного кроку точності — точніше
+    // біржа все одно не приймає.
+    const total = allocated.reduce((sum, q) => sum + q, 0);
+    assert.ok(
+      Math.abs(total - qty) < step,
+      `funded levels must sum to ${qty} within one step, got ${total}`,
+    );
+  }
 });
 
 test('reversal exit requires two distinct weak closed candles', () => {

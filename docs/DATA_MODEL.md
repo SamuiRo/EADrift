@@ -11,7 +11,15 @@ erDiagram
     trades ||--o{ sl_history : "tradeId"
 ```
 
-`db.sync({ alter: false })` створює відсутні таблиці, але не виконує керовані schema migrations.
+`db.sync({ alter: false })` створює відсутні таблиці, але не змінює наявні.
+Тому `initDatabase()` перед sync виконує `runColumnMigrations()` — ідемпотентний
+список `ALTER TABLE ... ADD COLUMN`, який доводить робочу БД до поточної схеми.
+Порядок важливий: sync намагається створити індекси на нових колонках, тому
+міграції мусять іти першими.
+
+`source` фіксує джерело сигналу. Геометрія і статистика в різних провайдерів
+різні, тому калібрування виходу має бути окремим для кожного — без цього поля
+вибірки змішуються і середні втрачають сенс.
 
 ## `signals`
 
@@ -19,7 +27,7 @@ erDiagram
 
 Ключові поля:
 
-- ідентифікація: `id`, `signalId`, `symbol`, `side`;
+- ідентифікація: `id`, `signalId`, `source`, `symbol`, `side`;
 - план: `entryLow`, `entryHigh`, `entryMid`, `slPrice`, `tpPrices`, `timeframe`;
 - джерело: `accuracy`, `rawText`, `priceAtSignal`, `receivedAt`;
 - рішення: `status`, `rejectReason`.

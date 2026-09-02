@@ -17,7 +17,15 @@ export function isPositionTimedOut({ entryTime, timeoutCandles, interval, now = 
   return now >= entryTime + timeoutCandles * intervalMs;
 }
 
-export const TP_DISTRIBUTION = [0.45, 0.35, 0.15, 0.05];
+/**
+ * Розподіл позиції між TP-рівнями.
+ *
+ * TP4 отримує нуль свідомо: на перевіреній вибірці він не спрацював жодного разу,
+ * тоді як TP2 бере половину сигналів і платить більше за TP1. Нульова частка
+ * зберігає рівень у масиві (індекси TP лишаються стабільними), але ордер на нього
+ * не виставляється.
+ */
+export const TP_DISTRIBUTION = [0.40, 0.40, 0.20, 0];
 
 export function normalizedTpShares(levelCount, distribution = TP_DISTRIBUTION) {
   const selected = distribution.slice(0, levelCount);
@@ -33,10 +41,15 @@ export function allocateTpQuantities(
 ) {
   const shares = normalizedTpShares(levelCount, distribution);
   const factor = 10 ** precision;
+
+  // Залишок від округлення віддаємо останньому рівню з ненульовою часткою —
+  // інакше рівень із часткою 0 отримав би цей залишок і породив зайвий ордер.
+  const lastFunded = shares.reduce((last, share, index) => share > 0 ? index : last, -1);
   let allocated = 0;
 
   return shares.map((share, index) => {
-    if (index === shares.length - 1) {
+    if (share <= 0) return 0;
+    if (index === lastFunded) {
       return Math.max(0, Math.round((totalQuantity - allocated) * factor) / factor);
     }
     const quantity = Math.floor(totalQuantity * share * factor) / factor;

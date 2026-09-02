@@ -30,9 +30,10 @@ flowchart LR
 | Config | `src/config/app.config.js` | Читання `.env`, перевірка обов'язкових змінних |
 | Signal source | `src/sources/telegram/TelegramSourceListener.js`, `src/module/telegram/TelegramClient.js` | MTProto-підключення, NewMessage events, fallback ping, дедуплікація |
 | Parsing | `src/parser/signalParser.js` | Перетворення тексту каналу на `SIGNAL`, `REPORT` або `null` |
+| Validation | `src/core/signalGeometry.js` | Схема, геометрія сигналу, звірка чисел із текстом-джерелом |
 | Decision layer | `src/bot/confirmation.js`, `src/core/tradingMode.js` | Market validation, risk calculation, auto/confirm/reject рішення |
 | Operator interface | `src/bot/telegram.js`, `src/bot/commands.js` | Telegram Bot API, admin guard, команди й повідомлення |
-| Trading core | `src/core/riskEngine.js`, `src/core/positionMonitor.js` | Розмір позиції, leverage, TP/SL стратегія, polling |
+| Trading core | `src/core/riskEngine.js`, `src/core/exitStrategy.js`, `src/core/positionMonitor.js` | Розмір позиції, leverage, власний SL, TP/SL стратегія, polling |
 | Exchange adapter | `src/exchanges/binance.js` | HMAC REST-запити, market data, positions, orders, SL/TP |
 | Persistence | `src/module/db/*` | SQLite, Sequelize-моделі, repository та аналітичні запити |
 | Shared | `src/shared/*` | Winston logger, консольні утиліти, banner |
@@ -77,12 +78,15 @@ EADrift/
 │   ├── bot/
 │   │   ├── commands.js           # admin slash-команди
 │   │   ├── confirmation.js       # рішення та виконання сигналу
+│   │   ├── signalIntake.js       # спільний вхід для каналу й адмін-повідомлень
 │   │   └── telegram.js           # Telegram Bot API singleton
 │   ├── config/
 │   │   └── app.config.js
 │   ├── core/
+│   │   ├── exitStrategy.js       # чиста математика виходу (TP, ATR, momentum)
 │   │   ├── positionMonitor.js    # in-memory watchlist + polling
-│   │   ├── riskEngine.js
+│   │   ├── riskEngine.js         # розмір позиції, власний SL, зважений R:R
+│   │   ├── signalGeometry.js     # валідація структури сигналу
 │   │   └── tradingMode.js
 │   ├── exchanges/
 │   │   └── binance.js
@@ -108,8 +112,9 @@ EADrift/
 │   │   └── telegram/
 │   │       └── TelegramSourceListener.js
 │   └── index.js
+├── test/                         # node:test, без мережі
 ├── .env
-├── .env.example                  # зараз порожній
+├── .env.example
 ├── package.json
 └── README.md
 ```
@@ -147,5 +152,5 @@ EADrift/
 
 - Sequelize з dialect `sqlite` і пакетом `sqlite3`.
 - Таблиці синхронізуються через `db.sync({ alter: false })`.
-- Автоматичних міграцій немає.
+- Відсутні колонки додає ідемпотентний `runColumnMigrations()` перед sync.
 

@@ -28,7 +28,19 @@ export const RISK_CONFIG = {
 
   // Market-entry налаштування
   maxSlippagePct:   0.02,    // 2% — максимальний вихід ціни за зону входу
-  minRR:            1.5,     // мінімальний R:R для market-входу (до TP1)
+
+  // ── Власний SL ────────────────────────────────────────────────────────────
+  // SL провайдера відкалібровано під вхід по середині зони набору. При вході
+  // біля верхнього краю успадкування цього SL означає ризикувати 1R заради
+  // ~0.2R. Тому стоп рахуємо самі: відштовхуємось від відстані до TP1, але
+  // ніколи не тісніше за ATR-підлогу, інакше стоп збиває звичайний шум.
+  targetRR:          1.0,    // цільовий R:R до TP1 від фактичного входу
+  atrStopMultiplier: 0.75,   // мінімальна відстань SL у ATR таймфрейму сигналу
+
+  // ── Поріг якості угоди ────────────────────────────────────────────────────
+  // Міряти R:R до TP1 не має сенсу: провайдери ставлять TP1 приблизно на 1R.
+  // Оцінюємо зважений R:R по фактичному розподілу часток між TP-рівнями.
+  minWeightedRR:     1.2,
 };
 
 // ─── Статуси валідації ────────────────────────────────────────────────────────
@@ -53,10 +65,12 @@ export const VALIDATION = {
  *
  * @returns {Promise<RiskResult>}
  */
-export async function calculatePosition({ balance, entryPrice, slPrice, symbol, config = {} }) {
+export async function calculatePosition({ balance, entryPrice, slPrice, symbol, config = {}, symbolInfo = null }) {
   const cfg = { ...RISK_CONFIG, ...config };
 
-  const info          = await getSymbolInfo(symbol);
+  // symbolInfo можна підставити ззовні — це робить розрахунок тестованим
+  // без мережі й дозволяє перевикористати вже отримані дані символу.
+  const info          = symbolInfo ?? await getSymbolInfo(symbol);
   const delta         = Math.abs(entryPrice - slPrice) / entryPrice;
   const targetRiskUsd = balance * cfg.riskPct;
 
@@ -71,22 +85,23 @@ export async function calculatePosition({ balance, entryPrice, slPrice, symbol, 
   }
 
   // ── Розмір позиції (leverage.txt f3) ──────────────────────────────────────
-  let positionUsdt = targetRiskUsd / delta;
-  let leverage     = positionUsdt / balance;
+  let positionUsdt  = targetRiskUsd / delta;
+  let rawLeverage   = positionUsdt / balance;
 
   // ── Hard cap плеча (f6) ───────────────────────────────────────────────────
+  // Верхня межа справді обмежує розмір: більшу позицію рахунок не потягне.
   let leverageCapped = false;
-  if (leverage > cfg.maxLeverage) {
-    leverage       = cfg.maxLeverage;
-    positionUsdt   = balance * leverage;
+  if (rawLeverage > cfg.maxLeverage) {
+    rawLeverage    = cfg.maxLeverage;
+    positionUsdt   = balance * cfg.maxLeverage;
     leverageCapped = true;
   }
-  if (leverage < cfg.minLeverage) {
-    leverage     = cfg.minLeverage;
-    positionUsdt = balance * leverage;
-  }
 
-  leverage = Math.max(1, Math.ceil(leverage)); // Binance вимагає integer
+  // Нижня межа розміру НЕ обмежує. Розрахункове плече менше 1x означає лише,
+  // що маржинальне плече не потрібне — позиція просто менша за депозит.
+  // Підтягувати positionUsdt до balance тут не можна: це підмінило б розмір,
+  // порахований від ризику, і роздуло б реальний ризик у рази.
+  let leverage = Math.max(cfg.minLeverage, Math.ceil(rawLeverage)); // Binance вимагає integer
 
   // ── Min order (f8) ────────────────────────────────────────────────────────
   let minOrderAdjusted = false;
@@ -139,7 +154,9 @@ export async function calculatePosition({ balance, entryPrice, slPrice, symbol, 
  *   1. SL ще не порушений
  *   2. TP1 ще не досягнуто (залишився потенціал)
  *   3. Ціна не пішла далі ніж maxSlippagePct від межі зони входу
- *   4. R:R від поточної ціни до TP1 >= minRR
+ *
+ * Поріг R:R тут навмисно відсутній: рішення про якість угоди приймає
+ * planEntry() за зваженим R:R, порахованим від власного стопа.
  *
  * @param {object} params
  * @param {number}   params.currentPrice  поточна mark price
@@ -193,17 +210,102 @@ export function validateMarketEntry({ currentPrice, slPrice, tp1Price, entryLow,
     }
   }
 
-  // ── 4. R:R від поточної ціни ──────────────────────────────────────────────
+  // ── 4. R:R від поточної ціни (довідково) ──────────────────────────────────
+  // Порогом більше не є: провайдери ставлять TP1 приблизно на 1R від середини
+  // зони, тому фільтр по цій величині відхиляв би геть усе. Рішення про якість
+  // угоди приймає planEntry() за зваженим R:R і власним SL.
   const distToSL  = Math.abs(currentPrice - slPrice);
   const distToTP1 = Math.abs(tp1Price - currentPrice);
   const rrFromCurrent = distToSL > 0 ? distToTP1 / distToSL : 0;
 
-  if (rrFromCurrent < cfg.minRR) {
-    return { valid: false, inZone, slipped: !inZone, slippagePct, rrFromCurrent,
-      reason: `R:R від поточної ціни ${rrFromCurrent.toFixed(2)} < мін. ${cfg.minRR}` };
+  return { valid: true, inZone, slipped: !inZone, slippagePct, rrFromCurrent, reason: null };
+}
+
+// ─── План входу: власний SL і зважений R:R ────────────────────────────────────
+
+/**
+ * Порахувати власний stop-loss і оцінити якість угоди від фактичної ціни входу.
+ *
+ * SL провайдера відкалібровано під вхід по середині зони набору. Якщо ціна вже
+ * пішла і ми входимо біля краю зони, успадкований SL дає катастрофічну асиметрію:
+ * ризик 1R заради 0.2R. Тому відстань стопа рахуємо так:
+ *
+ *   needed   = |TP1 − entry| / targetRR      скільки дозволено ризикувати
+ *   distance = min(needed, відстань провайдера)   ширше за провайдера не йдемо
+ *   floor    = atrStopMultiplier × ATR       нижче — стоп збиває шум
+ *
+ * Якщо distance < floor, угода неможлива в межах цих обмежень — пропускаємо.
+ *
+ * @param {object} params
+ * @param {number}   params.entryPrice   фактична ціна входу
+ * @param {string}   params.side         'BUY' | 'SELL' | 'LONG' | 'SHORT'
+ * @param {number[]} params.tpPrices     рівні take-profit
+ * @param {number}   params.providerSl   SL із сигналу
+ * @param {number}   params.atr          ATR таймфрейму сигналу, в ціні
+ * @param {number[]} params.tpShares     частки позиції по рівнях (сума 1)
+ * @param {object}   [params.config]     override RISK_CONFIG
+ *
+ * @returns {{
+ *   ok: boolean, slPrice?: number, slDistance?: number, slSource?: string,
+ *   rr?: number[], weightedRR?: number, reason?: string,
+ * }}
+ */
+export function planEntry({ entryPrice, side, tpPrices, providerSl, atr, tpShares, config = {} }) {
+  const cfg    = { ...RISK_CONFIG, ...config };
+  const isLong = side === 'BUY' || side === 'LONG';
+
+  if (!tpPrices?.length)              return fail('No take-profit levels');
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return fail('Invalid entry price');
+
+  const tp1 = tpPrices[0];
+  const rewardToTp1 = isLong ? tp1 - entryPrice : entryPrice - tp1;
+  if (rewardToTp1 <= 0) return fail(`TP1 ${tp1} is already behind entry ${entryPrice}`);
+
+  const providerDistance = Math.abs(entryPrice - providerSl);
+  const needed  = rewardToTp1 / cfg.targetRR;
+  const distance = Math.min(needed, providerDistance);
+
+  if (Number.isFinite(atr) && atr > 0) {
+    const floor = cfg.atrStopMultiplier * atr;
+    if (distance < floor) {
+      return fail(
+        `SL would sit inside noise: ${pct(distance / entryPrice)} available, ` +
+        `${pct(floor / entryPrice)} needed for ${cfg.atrStopMultiplier}×ATR`
+      );
+    }
   }
 
-  return { valid: true, inZone, slipped: !inZone, slippagePct, rrFromCurrent, reason: null };
+  const slPrice = isLong ? entryPrice - distance : entryPrice + distance;
+  if (slPrice <= 0) return fail('Computed SL is not a positive price');
+
+  const rr = tpPrices.map(tp => Math.abs(tp - entryPrice) / distance);
+
+  // Зважений R:R по фактичному розподілу часток. Частки коротші за масив TP
+  // (або навпаки) нормалізуємо на перетині — оцінюємо тільки те, що реально виконуватиметься.
+  const shares = tpShares?.length ? tpShares : rr.map(() => 1 / rr.length);
+  const usable = Math.min(shares.length, rr.length);
+  const shareSum = shares.slice(0, usable).reduce((sum, s) => sum + s, 0);
+  const weightedRR = shareSum > 0
+    ? shares.slice(0, usable).reduce((sum, s, i) => sum + s * rr[i], 0) / shareSum
+    : 0;
+
+  if (weightedRR < cfg.minWeightedRR) {
+    return fail(
+      `Weighted R:R ${weightedRR.toFixed(2)} < min ${cfg.minWeightedRR} ` +
+      `(TP1 ${rr[0].toFixed(2)}R)`
+    );
+  }
+
+  return {
+    ok:         true,
+    slPrice,
+    slDistance: distance,
+    slSource:   distance < providerDistance ? 'own' : 'provider',
+    rr,
+    weightedRR,
+  };
+
+  function fail(reason) { return { ok: false, reason }; }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

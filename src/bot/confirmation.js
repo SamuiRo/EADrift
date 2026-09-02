@@ -29,14 +29,17 @@ import {
   openFullPosition,
   getMarkPrice,
   getAccountBalance,
+  getATR,
 } from '../exchanges/binance.js';
 import { watchPosition } from '../core/positionMonitor.js';
 import {
   calcFromBalance,
   applyLeverage,
   validateMarketEntry,
+  planEntry,
   VALIDATION,
 } from '../core/riskEngine.js';
+import { normalizedTpShares } from '../core/exitStrategy.js';
 import {
   getMode, isPaused, isFullAuto, isSemiAuto,
   TRADING_MODES, MODE_LABELS,
@@ -54,7 +57,6 @@ import {
 const CONFIRM_TTL_MS     = 30 * 60 * 1000; // 30 хвилин
 const REMINDER_BEFORE_MS =  5 * 60 * 1000; // нагадування за 5 хв
 
-const TP_DISTRIBUTION = { 1: 45, 2: 35, 3: 15, 4: 5 };
 
 class ConfirmationRejectedError extends Error {}
 
@@ -80,12 +82,33 @@ const pending = new Map();
  */
 export async function requestConfirmation(order) {
 
+  // ── Ринковий контекст ─────────────────────────────────────────────────────
+  // Отримуємо до розгалуження по режимах: mark price на момент сигналу — те
+  // єдине поле, без якого пізніший офлайн-реплей неможливий, тому воно має
+  // зберігатися навіть коли бот на паузі й нічого не торгує.
+  const [priceResult, balanceResult, atrResult] = await Promise.allSettled([
+    getMarkPrice(order.symbol),
+    getUSDTBalance(),
+    getATR(order.symbol, order.interval ?? '1h'),
+  ]);
+
+  const currentPrice = priceResult.status   === 'fulfilled' ? priceResult.value   : null;
+  const balance      = balanceResult.status === 'fulfilled' ? balanceResult.value : null;
+  const atr          = atrResult.status     === 'fulfilled' ? atrResult.value     : null;
+
+  if (atrResult.status === 'rejected') {
+    logger.warn('ATR unavailable — stop-loss floor will be skipped', {
+      symbol: order.symbol, err: atrResult.reason?.message,
+    });
+  }
+
   // ── PAUSED ─────────────────────────────────────────────────────────────────
   if (isPaused()) {
-    logger.info('Signal ignored — bot is paused', { symbol: order.symbol });
+    logger.info('Signal ignored — bot is paused', { symbol: order.symbol, currentPrice });
 
-    // Зберігаємо в БД навіть проігноровані сигнали
-    const signalRecord = await saveSignal(order, null).catch(() => null);
+    // Зберігаємо в БД навіть проігноровані сигнали — разом із ціною на момент
+    // отримання, інакше запис не придатний для подальшого аналізу.
+    const signalRecord = await saveSignal(order, currentPrice).catch(() => null);
     await updateSignalStatus(signalRecord?.id, 'PAUSED');
 
     await sendMarkdown(
@@ -95,15 +118,6 @@ export async function requestConfirmation(order) {
     );
     return null;
   }
-
-  // ── Отримуємо поточну ціну і баланс паралельно ────────────────────────────
-  const [priceResult, balanceResult] = await Promise.allSettled([
-    getMarkPrice(order.symbol),
-    getUSDTBalance(),
-  ]);
-
-  const currentPrice = priceResult.status  === 'fulfilled' ? priceResult.value  : null;
-  const balance      = balanceResult.status === 'fulfilled' ? balanceResult.value : null;
 
   // ── Зберігаємо сигнал в БД одразу після отримання ціни ───────────────────
   // Статус PENDING — оновимо після рішення
@@ -158,12 +172,40 @@ export async function requestConfirmation(order) {
       return null;
     }
 
-    // Якщо ціна вийшла з зони — входимо по ринку за поточною ціною
-    if (!marketEntry.inZone) {
-      effectiveEntry = currentPrice;
-      order = { ...order, entryType: 'MARKET', entryPrice: currentPrice };
-    }
+    // Входимо по ринку і в зоні, і при виході з неї.
+    //
+    // Раніше при ціні в зоні виставлявся LIMIT по її середині. На реплеї
+    // реальних сигналів це найгірша з перевірених політик: лімітка, що чекає
+    // відкату вглиб зони, виконується переважно тоді, коли сетап уже
+    // розвалюється — SL провайдера стоїть одразу за дальнім краєм. Вхід по
+    // доступній зараз ціні дав помітно кращий результат.
+    effectiveEntry = currentPrice;
+    order = { ...order, entryType: 'MARKET', entryPrice: currentPrice };
   }
+
+  // ── Власний SL і оцінка якості угоди ──────────────────────────────────────
+  const plan = planEntry({
+    entryPrice: effectiveEntry,
+    side:       order.side,
+    tpPrices:   order.tpPrices,
+    providerSl: order.slPrice,
+    atr,
+    tpShares:   normalizedTpShares(order.tpPrices.length),
+  });
+
+  if (!plan.ok) {
+    logger.warn('Signal rejected by entry plan', { symbol: order.symbol, reason: plan.reason });
+    await updateSignalStatus(order._signalDbId, 'REJECTED', plan.reason);
+    await sendMarkdown(
+      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
+      `*Причина:* ${plan.reason}\n\n` +
+      `_Ордер не виставлено_`
+    );
+    return null;
+  }
+
+  // SL провайдера лишається в записі сигналу; торгуємо власним.
+  order = { ...order, providerSlPrice: order.slPrice, slPrice: plan.slPrice };
 
   // ── Розраховуємо ризик від ефективної ціни ────────────────────────────────
   // Передаємо вже отриманий баланс напряму — щоб не робити повторний запит
@@ -237,7 +279,7 @@ export async function requestConfirmation(order) {
   }
 
   // ── CONFIRM ───────────────────────────────────────────────────────────────
-  return showConfirmCard(enrichedOrder, riskResult, marketEntry, currentPrice, balance);
+  return showConfirmCard(enrichedOrder, riskResult, marketEntry, currentPrice, balance, plan);
 }
 
 export function registerConfirmationHandler() {
@@ -255,9 +297,9 @@ export function registerConfirmationHandler() {
 
 // ─── Confirmation card ────────────────────────────────────────────────────────
 
-async function showConfirmCard(order, risk, marketEntry, currentPrice, balance) {
+async function showConfirmCard(order, risk, marketEntry, currentPrice, balance, plan) {
   const confirmId = crypto.randomUUID();
-  const text      = buildConfirmCard(order, risk, marketEntry, currentPrice, balance);
+  const text      = buildConfirmCard(order, risk, marketEntry, currentPrice, balance, plan);
   const keyboard  = buildKeyboard(confirmId);
 
   const sentMsg = await sendMarkdown(text, { reply_markup: keyboard });
@@ -270,7 +312,7 @@ async function showConfirmCard(order, risk, marketEntry, currentPrice, balance) 
 
   // Зберігаємо balance щоб передати в executeOrder при підтвердженні
   pending.set(confirmId, {
-    order, risk, marketEntry, balance,
+    order, risk, marketEntry, balance, plan,
     evaluationPrice: currentPrice,
     messageId: sentMsg.message_id,
     expiresAt, resolved: false, reminderTimer, expireTimer,
@@ -289,7 +331,7 @@ async function showConfirmCard(order, risk, marketEntry, currentPrice, balance) 
 
 // ─── Card builder ─────────────────────────────────────────────────────────────
 
-function buildConfirmCard(order, risk, marketEntry, currentPrice, balance) {
+function buildConfirmCard(order, risk, marketEntry, currentPrice, balance, plan) {
   const { symbol, side, entryType, entryPrice, slPrice, tpPrices = [] } = order;
 
   const isLong    = side === 'BUY';
@@ -344,6 +386,14 @@ function buildConfirmCard(order, risk, marketEntry, currentPrice, balance) {
     const slPts   = Math.abs(refPrice - slPrice);
     const slArrow = isLong ? '▼' : '▲';
     lines.push(`Stop-Loss    : \`${fmt(slPrice)}\`  (${slArrow} ${slPct.toFixed(2)}% | ${fmt(slPts)} pts)`);
+
+    // Коли стоп власний, показуємо наскільки він вужчий за SL провайдера —
+    // це основне джерело різниці в R між цією угодою і сигналом як опубліковано.
+    if (order.providerSlPrice && plan?.slSource === 'own') {
+      const provPct = Math.abs(pctDiff(order.providerSlPrice, refPrice));
+      const tighter = provPct / (slPct || 1);
+      lines.push(`SL сигналу   : \`${fmt(order.providerSlPrice)}\`  (${provPct.toFixed(2)}%) — власний вужчий у ${tighter.toFixed(1)}×`);
+    }
   }
 
   // ── Take-Profits ───────────────────────────────────────────────────────────
@@ -357,18 +407,25 @@ function buildConfirmCard(order, risk, marketEntry, currentPrice, balance) {
       ? `  _(R:R від поточної ціни)_`
       : '';
 
+    const shares = normalizedTpShares(tpPrices.length);
+
     tpPrices.forEach((tp, i) => {
       const level  = i + 1;
-      const share  = TP_DISTRIBUTION[level] ?? Math.round(100 / tpPrices.length);
+      const share  = Math.round((shares[i] ?? 0) * 100);
       const tpPct  = refPrice ? Math.abs(pctDiff(tp, refPrice)) : null;
       const sign   = isLong ? '+' : '-';
       const pctStr = tpPct !== null ? ` ${sign}${tpPct.toFixed(2)}%` : '';
       const rrStr  = rPts ? `  ${(Math.abs(tp - refPrice) / rPts).toFixed(1)}R` : '';
-      lines.push(`TP${level} → \`${fmt(tp)}\` (${pctStr}${rrStr})  — *${share}% позиції*`);
+      const shareLabel = share > 0 ? `*${share}% позиції*` : '_не виставляється_';
+      lines.push(`TP${level} → \`${fmt(tp)}\` (${pctStr}${rrStr})  — ${shareLabel}`);
     });
 
-    // Для market-входу показуємо загальний R:R окремо
-    if (marketEntry?.rrFromCurrent) {
+    // Зважений R:R — те, за чим приймається рішення. R:R до TP1 показуємо
+    // довідково: провайдери ставлять TP1 приблизно на 1R, тому сам по собі
+    // він майже нічого не говорить про якість угоди.
+    if (plan?.weightedRR) {
+      lines.push(`R:R зважений : \`${plan.weightedRR.toFixed(2)}\`  (до TP1: \`${plan.rr[0].toFixed(2)}\`)${rrNote}`);
+    } else if (marketEntry?.rrFromCurrent) {
       lines.push(`R:R до TP1 від входу : \`${marketEntry.rrFromCurrent.toFixed(2)}\`${rrNote}`);
     }
   }
@@ -516,6 +573,23 @@ async function recheckBeforeExecution(entry) {
   }
 
   const effectiveEntry = order.entryType === 'MARKET' ? currentPrice : order.entryPrice;
+
+  // Стоп перераховуємо від фактичної ціни підтвердження, а не переносимо той,
+  // що був порахований 30 хвилин тому: ціна змістилась — змістився і план.
+  const atr = await getATR(order.symbol, order.interval ?? '1h').catch(() => null);
+  const plan = planEntry({
+    entryPrice: effectiveEntry,
+    side:       order.side,
+    tpPrices:   order.tpPrices,
+    providerSl: order.providerSlPrice ?? order.slPrice,
+    atr,
+    tpShares:   normalizedTpShares(order.tpPrices.length),
+  });
+
+  if (!plan.ok) throw new ConfirmationRejectedError(plan.reason);
+
+  order = { ...order, providerSlPrice: order.providerSlPrice ?? order.slPrice, slPrice: plan.slPrice };
+
   const risk = await calcFromBalance({
     entryPrice: effectiveEntry,
     slPrice: order.slPrice,
@@ -533,8 +607,11 @@ async function recheckBeforeExecution(entry) {
     symbol: order.symbol,
     evaluationPrice,
     currentPrice,
-    entryType: order.entryType,
+    entryType:  order.entryType,
     riskStatus: risk.status,
+    slPrice:    plan.slPrice,
+    slSource:   plan.slSource,
+    weightedRR: Number(plan.weightedRR.toFixed(2)),
   });
 
   return {

@@ -1,10 +1,12 @@
 import { getBot, isAdmin, sendMarkdown } from './telegram.js';
 import { requestConfirmation } from './confirmation.js';
 import { parseSignal } from '../parser/signalParser.js';
+import { validateSignal } from '../core/signalGeometry.js';
 import { logger } from '../shared/logger.js';
 
-export function signalToOrder(signal) {
+export function signalToOrder(signal, source = 'unknown') {
   return {
+    source,
     symbol:     signal.symbol,
     side:       signal.side === 'LONG' ? 'BUY' : 'SELL',
     entryType:  'LIMIT',
@@ -30,13 +32,31 @@ export async function handleParsedSignal(signal, { source = 'unknown' } = {}) {
     return null;
   }
 
+  // Геометрична перевірка до будь-якої торгової логіки. Ловить інвертовану зону,
+  // переплутаний side, поміняні місцями SL і TP — незалежно від того, хто парсив.
+  const check = validateSignal(signal, { verifySource: Boolean(signal.parsedBy) });
+  if (!check.valid) {
+    logger.warn('Signal failed geometry validation', {
+      source,
+      symbol: signal.symbol,
+      side:   signal.side,
+      errors: check.errors,
+    });
+    await sendMarkdown(
+      `🚫 *Сигнал не пройшов перевірку структури* — ${signal.symbol}\n\n` +
+      check.errors.map(e => `• ${e}`).join('\n') +
+      `\n\n_Ордер не виставлено_`
+    );
+    return null;
+  }
+
   logger.info('New signal received, requesting confirmation', {
     source,
     symbol: signal.symbol,
     side: signal.side,
   });
 
-  return requestConfirmation(signalToOrder(signal));
+  return requestConfirmation(signalToOrder(signal, source));
 }
 
 export function registerAdminSignalIntake() {

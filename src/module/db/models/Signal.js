@@ -21,6 +21,16 @@ export default (sequelize) => sequelize.define('Signal', {
     comment:   'ID сигналу з Telegram-каналу',
   },
 
+  // Звідки прийшов сигнал. Геометрія і статистика в різних джерел різні,
+  // тому калібрування виходу має бути окремим для кожного — без цього поля
+  // вибірки змішуються і середні втрачають сенс.
+  source: {
+    type:         DataTypes.STRING(64),
+    allowNull:    false,
+    defaultValue: 'unknown',
+    comment:      'channel | admin_message | admin_forward | <назва джерела>',
+  },
+
   symbol: {
     type:      DataTypes.STRING(20),
     allowNull: false,
@@ -99,6 +109,7 @@ export default (sequelize) => sequelize.define('Signal', {
   timestamps: true, // createdAt, updatedAt
   indexes: [
     { fields: ['symbol'] },
+    { fields: ['source'] },
     { fields: ['status'] },
     { fields: ['receivedAt'] },
     { fields: ['signalId'] },

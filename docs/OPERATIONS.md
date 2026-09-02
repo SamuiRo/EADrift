@@ -53,7 +53,7 @@ npm run dev
 | `NODE_ENV` | немає | експортується, але логіку не змінює |
 | `DEFAULT_POSITION_SIZE_USDT` | `"20"` | експортується, але зараз не використовується |
 
-Поточний `.env.example` порожній, тому перелік вище є актуальним контрактом конфігурації.
+`.env.example` містить перелік змінних із placeholder-значеннями.
 
 ## Telegram-команди
 
@@ -65,7 +65,7 @@ npm run dev
 | Команда | Дія |
 |---|---|
 | `/start` | довідка та поточний режим |
-| `/status` | режим, USDT balance, кількість watched positions, risk config |
+| `/status` | режим, USDT balance, watched positions, risk config, правило SL і сітка TP |
 | `/mode full_auto` | усі валідні сигнали виконуються автоматично |
 | `/mode semi_auto` | auto лише для risk OK і ціни в зоні |
 | `/mode confirm` | завжди вимагати підтвердження |

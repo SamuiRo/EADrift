@@ -76,11 +76,52 @@ export async function initDatabase({ alter = false } = {}) {
     await db.authenticate();
     logger.info('Database connection established', { path: DB_PATH });
 
+    // Міграції — до sync(). Інакше sync спробує створити індекс на колонці,
+    // якої в наявній таблиці ще немає, і впаде. На порожній БД міграції просто
+    // не знаходять таблиць і пропускаються, а sync створює все зі схеми.
+    await runColumnMigrations();
+
     await db.sync({ alter });
     logger.info('Database synced', { alter });
 
   } catch (err) {
     logger.error('Database initialization failed', { err: err.message });
     throw err;
+  }
+}
+
+/**
+ * Додати колонки, яких бракує в уже існуючій БД.
+ *
+ * `db.sync({ alter: false })` створює відсутні таблиці, але не змінює наявні,
+ * тому робоча база на сервері не отримала б нових полів. Кожен крок
+ * ідемпотентний: колонка додається лише якщо її ще немає.
+ *
+ * Свідомо обмежено ADD COLUMN — цього достатньо для додавання полів і воно
+ * не переписує таблицю, тобто не ризикує наявними даними.
+ */
+const COLUMN_MIGRATIONS = [
+  {
+    table:  'signals',
+    column: 'source',
+    ddl:    `ALTER TABLE \`signals\` ADD COLUMN \`source\` VARCHAR(64) NOT NULL DEFAULT 'unknown'`,
+  },
+];
+
+async function runColumnMigrations() {
+  for (const { table, column, ddl } of COLUMN_MIGRATIONS) {
+    try {
+      const columns = await db.getQueryInterface().describeTable(table);
+      if (columns[column]) continue;
+
+      await db.query(ddl);
+      logger.info('Database migration applied', { table, column });
+
+    } catch (err) {
+      // Відсутня таблиця на порожній БД — не помилка: sync створить її зі схеми.
+      if (/no such table/i.test(err.message)) continue;
+      logger.error('Database migration failed', { table, column, err: err.message });
+      throw err;
+    }
   }
 }

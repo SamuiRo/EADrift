@@ -39,7 +39,13 @@ Parser розпізнає:
 Повідомлення з приватного адмін-чату проходить той самий parser, market validation,
 risk calculation та confirmation flow, що й сигнал із каналу.
 
-Для entry zone parser очікує формат `Entry Zone: HIGH - LOW`: перше число записується як `entryHigh`, друге як `entryLow`.
+Межі entry zone визначаються за значенням, а не за позицією в рядку: менше
+число стає `entryLow`, більше — `entryHigh`. Джерела пишуть зону в обох порядках
+(`LOW - HIGH` і `HIGH - LOW`), тому покладатися на позицію не можна.
+
+Після парсингу сигнал проходить `validateGeometry()` — перевірку взаємного
+розташування SL, зони та TP. Вона не залежить від того, хто парсив, і ловить
+інвертовану зону, переплутаний `side`, поміняні місцями SL і TP та немонотонні цілі.
 
 ## 3. Рішення щодо нового сигналу
 
@@ -51,10 +57,10 @@ flowchart TD
     C --> D["Save signal as PENDING"]
     D --> E["validateMarketEntry"]
     E -->|invalid| R1["Signal REJECTED"]
-    E -->|outside zone but valid| M["Switch entry to MARKET"]
-    E -->|inside zone| L["Keep LIMIT entry"]
-    M --> G["calcFromBalance"]
-    L --> G
+    E -->|valid| M["MARKET entry at current price"]
+    M --> P["planEntry: own SL + weighted R:R"]
+    P -->|below threshold or SL inside noise| R4["Signal REJECTED"]
+    P --> G["calcFromBalance"]
     G -->|calculation failed or REJECT| R2["Signal REJECTED"]
     G --> H{"Trading mode"}
     H -->|FULL_AUTO| X["Execute immediately"]
@@ -73,7 +79,10 @@ flowchart TD
 1. SL ще не порушений.
 2. TP1 ще не досягнутий.
 3. Вихід із entry zone не перевищує 2%.
-4. R:R від поточної ціни до TP1 не нижчий за 1.5.
+
+Далі `planEntry()` розраховує власний SL і зважений R:R. Сигнал відхиляється,
+якщо зважений R:R нижчий за `minWeightedRR`, або якщо потрібний стоп опиняється
+всередині шуму (ближче за `atrStopMultiplier × ATR`).
 
 Картка підтвердження живе 30 хвилин; за 5 хвилин до завершення надсилається нагадування.
 
@@ -94,11 +103,12 @@ SL/TP/R:R/slippage, перераховує risk та відхиляє сигна
 
 `openFullPosition()`:
 
-1. Виставляє MARKET або LIMIT entry.
+1. Виставляє MARKET entry (LIMIT-гілка збережена в адаптері, але торговий
+   flow її наразі не використовує).
 2. Для LIMIT чекає статус `FILLED`, polling кожні 1.5 секунди, максимум 120 секунд.
 3. Виставляє STOP_MARKET на всю виконану кількість.
 4. Виставляє reduce-only TAKE_PROFIT_MARKET ордери на Binance з розподілом
-   `45% / 35% / 15% / 5%`.
+   `40% / 40% / 20%`. Рівень із нульовою часткою ордера не отримує.
 
 Якщо TP-рівнів менше чотирьох, частки нормалізуються до 100% на наявні рівні.
 

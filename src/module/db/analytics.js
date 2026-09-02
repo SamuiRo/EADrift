@@ -5,51 +5,61 @@
  *  1. Оптимальний SL (яка ширина дає кращий R)
  *  2. Оптимальний TP (скільки угод доходять до TP2, TP3)
  *  3. Ефективність trailing і BE+
- *  4. Статистика по символу / таймфрейму
+ *  4. Статистика по символу, режиму й джерелу сигналів
+ *  5. Де саме відсіюються сигнали
  *
  * Використання:
  *   import { slOptimizationReport, tpHitRate } from './db/analytics.js';
+ *   npm run report
+ *
+ * Про назви колонок: Sequelize налаштований з `underscored: false`, тому в
+ * SQLite колонки записані camelCase — "entryPrice", "profitR", "tradeId".
+ * Ідентифікатори тут беруться в подвійні лапки, бо без них SQLite звів би
+ * регістр до нечутливого пошуку лише випадково, а не за правилом.
  */
 
-import { db, Trade, Signal, SlHistory, TradeEvent } from './database.js';
+import { db, Trade } from './database.js';
 import { QueryTypes } from 'sequelize';
+
+const select = sql => db.query(sql, { type: QueryTypes.SELECT });
 
 // ─── SL аналіз ────────────────────────────────────────────────────────────────
 
 /**
- * Розподіл delta (SL ширина) і середній R по кожному відрізку.
- * Допомагає знайти оптимальний діапазон SL.
+ * Розподіл delta (ширина SL) і середній R по кожному відрізку 0.5%.
+ * Допомагає побачити, на якій ширині стопа угоди справді окупаються.
  *
- * Повертає масив:
- *   [{ deltaBucket, tradeCount, avgProfitR, winRate, avgTimeInTradeH }]
+ * @returns {Promise<Array<{
+ *   deltaBucketPct: number, tradeCount: number, avgProfitR: number,
+ *   winRatePct: number, avgTimeInTradeH: number,
+ * }>>}
  */
 export async function slOptimizationReport() {
-  return db.query(`
+  return select(`
     SELECT
-      ROUND(
-        CAST(ABS(entry_price - sl_price_initial) / entry_price * 100 AS REAL) / 0.5
-      ) * 0.5 AS delta_bucket_pct,
+      ROUND(ABS("entryPrice" - "slPriceInitial") / "entryPrice" * 100 / 0.5) * 0.5
+        AS "deltaBucketPct",
 
-      COUNT(*)                                         AS trade_count,
-      ROUND(AVG(profit_r), 3)                          AS avg_profit_r,
-      ROUND(SUM(CASE WHEN profit_usdt > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate_pct,
-      ROUND(AVG(time_in_trade_ms) / 3600000.0, 2)     AS avg_time_in_trade_h
+      COUNT(*)                                     AS "tradeCount",
+      ROUND(AVG("profitR"), 3)                     AS "avgProfitR",
+      ROUND(SUM(CASE WHEN "profitUsdt" > 0 THEN 1 ELSE 0 END) * 100.0
+            / NULLIF(COUNT(*), 0), 1)              AS "winRatePct",
+      ROUND(AVG("timeInTradeMs") / 3600000.0, 2)   AS "avgTimeInTradeH"
 
-    FROM trades
-    WHERE status = 'CLOSED'
-      AND profit_r IS NOT NULL
-      AND sl_price_initial IS NOT NULL
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+      AND "profitR" IS NOT NULL
+      AND "slPriceInitial" IS NOT NULL
+      AND "entryPrice" > 0
 
-    GROUP BY delta_bucket_pct
-    ORDER BY delta_bucket_pct ASC
-  `, { type: QueryTypes.SELECT });
+    GROUP BY "deltaBucketPct"
+    ORDER BY "deltaBucketPct" ASC
+  `);
 }
 
 /**
- * Яке максимальне несприятливе відхилення (MAE) буває до TP1.
- * Показує наскільки щільно можна виставити SL не втрачаючи угоди.
- *
- * Повертає: [{ symbol, side, maxDrawdownPct, tp1Hit, profitR }]
+ * Максимальне несприятливе відхилення (MAE) по закритих угодах.
+ * Показує, наскільки щільно можна ставити SL, не втрачаючи угоду.
  */
 export async function maeReport() {
   return Trade.findAll({
@@ -64,159 +74,232 @@ export async function maeReport() {
 // ─── TP аналіз ────────────────────────────────────────────────────────────────
 
 /**
- * Hit rate по кожному рівню TP і середній R.
+ * Hit rate по кожному рівню TP.
  *
- * Повертає:
- *   { tp1HitRate, tp2HitRate, tp3HitRate, tp4HitRate, avgR }
+ * Найважливіший звіт для калібрування сітки: частка позиції на рівні має
+ * відповідати тому, як часто цей рівень реально спрацьовує.
  */
 export async function tpHitRate() {
-  const [row] = await db.query(`
+  const [row] = await select(`
     SELECT
-      COUNT(*)                                                            AS total,
-      ROUND(SUM(tp1_hit) * 100.0 / COUNT(*), 1)                          AS tp1_hit_rate,
-      ROUND(SUM(tp2_hit) * 100.0 / COUNT(*), 1)                          AS tp2_hit_rate,
-      ROUND(SUM(tp3_hit) * 100.0 / COUNT(*), 1)                          AS tp3_hit_rate,
-      ROUND(SUM(tp4_hit) * 100.0 / COUNT(*), 1)                          AS tp4_hit_rate,
-      ROUND(AVG(profit_r), 3)                                             AS avg_profit_r,
-      ROUND(SUM(CASE WHEN profit_usdt > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate_pct
-    FROM trades
-    WHERE status = 'CLOSED'
-  `, { type: QueryTypes.SELECT });
+      COUNT(*)                                                  AS "total",
+      ROUND(SUM("tp1Hit") * 100.0 / NULLIF(COUNT(*), 0), 1)     AS "tp1HitRate",
+      ROUND(SUM("tp2Hit") * 100.0 / NULLIF(COUNT(*), 0), 1)     AS "tp2HitRate",
+      ROUND(SUM("tp3Hit") * 100.0 / NULLIF(COUNT(*), 0), 1)     AS "tp3HitRate",
+      ROUND(SUM("tp4Hit") * 100.0 / NULLIF(COUNT(*), 0), 1)     AS "tp4HitRate",
+      ROUND(AVG("profitR"), 3)                                  AS "avgProfitR",
+      ROUND(SUM(CASE WHEN "profitUsdt" > 0 THEN 1 ELSE 0 END) * 100.0
+            / NULLIF(COUNT(*), 0), 1)                           AS "winRatePct"
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+  `);
 
-  return row;
+  return row ?? null;
 }
 
 /**
- * Розподіл за closeReason — що найчастіше закриває угоди.
+ * Розподіл за closeReason — що саме закриває угоди і з яким результатом.
  */
 export async function closeReasonBreakdown() {
-  return db.query(`
+  return select(`
     SELECT
-      close_reason,
-      COUNT(*)                        AS trade_count,
-      ROUND(AVG(profit_r), 3)         AS avg_profit_r,
-      ROUND(AVG(profit_pct), 2)       AS avg_profit_pct,
-      ROUND(AVG(time_in_trade_ms) / 3600000.0, 2) AS avg_hours
-    FROM trades
-    WHERE status = 'CLOSED'
-    GROUP BY close_reason
-    ORDER BY trade_count DESC
-  `, { type: QueryTypes.SELECT });
+      "closeReason",
+      COUNT(*)                                    AS "tradeCount",
+      ROUND(AVG("profitR"), 3)                    AS "avgProfitR",
+      ROUND(AVG("profitPct"), 2)                  AS "avgProfitPct",
+      ROUND(AVG("timeInTradeMs") / 3600000.0, 2)  AS "avgHours"
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+    GROUP BY "closeReason"
+    ORDER BY "tradeCount" DESC
+  `);
 }
 
 // ─── Trailing і BE+ ───────────────────────────────────────────────────────────
 
 /**
- * Аналіз trailing: середня відстань від ціни до trailing SL.
- * Показує наскільки trailing "тісний" або "слабкий".
+ * Наскільки тісно trailing тримає ціну.
  */
 export async function trailingEfficiency() {
-  return db.query(`
+  return select(`
     SELECT
-      t.symbol,
-      COUNT(sl.id)                                 AS trailing_updates,
-      ROUND(AVG(sl.distance_from_price_pct), 3)    AS avg_distance_pct,
-      ROUND(MIN(sl.distance_from_price_pct), 3)    AS min_distance_pct,
-      ROUND(MAX(sl.distance_from_price_pct), 3)    AS max_distance_pct
-    FROM sl_history sl
-    JOIN trades t ON t.id = sl.trade_id
-    WHERE sl.reason = 'TRAILING'
-    GROUP BY t.symbol
-    ORDER BY trailing_updates DESC
-  `, { type: QueryTypes.SELECT });
+      t."symbol",
+      COUNT(sl."id")                              AS "trailingUpdates",
+      ROUND(AVG(sl."distanceFromPricePct"), 3)    AS "avgDistancePct",
+      ROUND(MIN(sl."distanceFromPricePct"), 3)    AS "minDistancePct",
+      ROUND(MAX(sl."distanceFromPricePct"), 3)    AS "maxDistancePct"
+    FROM "sl_history" sl
+    JOIN "trades" t ON t."id" = sl."tradeId"
+    WHERE sl."reason" = 'TRAILING'
+    GROUP BY t."symbol"
+    ORDER BY "trailingUpdates" DESC
+  `);
 }
 
 /**
- * BE+ ефективність: скільки разів після BE+ ціна поверталась і вибивала по SL.
- * Порівнює угоди де SL досяг BE+ з подальшим результатом.
+ * Чи допомагає перенос у BE+.
+ *
+ * Показує, скільки угод після переносу все одно закрилися по стопу — тобто
+ * скільки разів BE+ забрав угоду, яка могла б доїхати далі.
  */
 export async function beEffectiveness() {
-  return db.query(`
+  return select(`
     SELECT
-      t.symbol,
-      COUNT(DISTINCT t.id)                    AS trades_with_be,
-      SUM(CASE WHEN t.profit_usdt >= 0 THEN 1 ELSE 0 END) AS profitable_after_be,
-      ROUND(AVG(t.profit_r), 3)               AS avg_profit_r_after_be,
-      SUM(CASE WHEN t.close_reason = 'sl_hit' THEN 1 ELSE 0 END) AS stopped_out_at_be
-    FROM trades t
-    INNER JOIN sl_history sl ON sl.trade_id = t.id AND sl.reason = 'BE_PLUS'
-    WHERE t.status = 'CLOSED'
-    GROUP BY t.symbol
-  `, { type: QueryTypes.SELECT });
+      t."symbol",
+      COUNT(DISTINCT t."id")                                          AS "tradesWithBe",
+      SUM(CASE WHEN t."profitUsdt" >= 0 THEN 1 ELSE 0 END)            AS "profitableAfterBe",
+      ROUND(AVG(t."profitR"), 3)                                      AS "avgProfitRAfterBe",
+      SUM(CASE WHEN t."closeReason" = 'sl_hit' THEN 1 ELSE 0 END)     AS "stoppedOutAtBe"
+    FROM "trades" t
+    INNER JOIN "sl_history" sl ON sl."tradeId" = t."id" AND sl."reason" = 'BE_PLUS'
+    WHERE t."status" = 'CLOSED'
+    GROUP BY t."symbol"
+  `);
 }
 
-// ─── Статистика по символу ────────────────────────────────────────────────────
+// ─── Зрізи ────────────────────────────────────────────────────────────────────
 
 /**
- * Повна статистика по кожному символу.
+ * Статистика по кожному символу й напрямку.
  */
 export async function symbolStats() {
-  return db.query(`
+  return select(`
     SELECT
-      symbol,
-      side,
-      COUNT(*)                                                             AS trades,
-      ROUND(SUM(CASE WHEN profit_usdt > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate,
-      ROUND(AVG(profit_r), 3)                                              AS avg_r,
-      ROUND(SUM(profit_usdt), 2)                                           AS total_pnl_usdt,
-      ROUND(AVG(leverage), 1)                                              AS avg_leverage,
-      ROUND(AVG(time_in_trade_ms) / 3600000.0, 2)                         AS avg_hours
-    FROM trades
-    WHERE status = 'CLOSED'
-    GROUP BY symbol, side
-    ORDER BY total_pnl_usdt DESC
-  `, { type: QueryTypes.SELECT });
+      "symbol",
+      "side",
+      COUNT(*)                                                        AS "trades",
+      ROUND(SUM(CASE WHEN "profitUsdt" > 0 THEN 1 ELSE 0 END) * 100.0
+            / NULLIF(COUNT(*), 0), 1)                                 AS "winRate",
+      ROUND(AVG("profitR"), 3)                                        AS "avgR",
+      ROUND(SUM("profitUsdt"), 2)                                     AS "totalPnlUsdt",
+      ROUND(AVG("leverage"), 1)                                       AS "avgLeverage",
+      ROUND(AVG("timeInTradeMs") / 3600000.0, 2)                      AS "avgHours"
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+    GROUP BY "symbol", "side"
+    ORDER BY "totalPnlUsdt" DESC
+  `);
 }
 
 /**
  * Статистика по торговому режиму — FULL_AUTO vs SEMI_AUTO vs CONFIRM_ONLY.
  */
 export async function modeStats() {
-  return db.query(`
+  return select(`
     SELECT
-      trading_mode,
-      COUNT(*)                                  AS trades,
-      ROUND(AVG(profit_r), 3)                   AS avg_r,
-      ROUND(SUM(profit_usdt), 2)                AS total_pnl,
-      ROUND(SUM(CASE WHEN profit_usdt > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate
-    FROM trades
-    WHERE status = 'CLOSED'
-    GROUP BY trading_mode
-  `, { type: QueryTypes.SELECT });
+      "tradingMode",
+      COUNT(*)                                                        AS "trades",
+      ROUND(AVG("profitR"), 3)                                        AS "avgR",
+      ROUND(SUM("profitUsdt"), 2)                                     AS "totalPnl",
+      ROUND(SUM(CASE WHEN "profitUsdt" > 0 THEN 1 ELSE 0 END) * 100.0
+            / NULLIF(COUNT(*), 0), 1)                                 AS "winRate"
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+    GROUP BY "tradingMode"
+  `);
 }
 
 /**
- * Скільки сигналів відхилено і чому — дає розуміння фільтрів.
+ * Статистика по джерелу сигналів.
+ *
+ * Геометрія в різних провайдерів різна, тому змішана вибірка дає середні,
+ * які не описують жодне з джерел. Калібрувати виходи треба окремо на кожне.
+ */
+export async function sourceStats() {
+  return select(`
+    SELECT
+      s."source",
+      COUNT(DISTINCT s."id")                                          AS "signals",
+      COUNT(t."id")                                                   AS "trades",
+      ROUND(AVG(t."profitR"), 3)                                      AS "avgR",
+      ROUND(SUM(t."profitUsdt"), 2)                                   AS "totalPnlUsdt",
+      ROUND(SUM(CASE WHEN t."profitUsdt" > 0 THEN 1 ELSE 0 END) * 100.0
+            / NULLIF(COUNT(t."id"), 0), 1)                            AS "winRate"
+    FROM "signals" s
+    LEFT JOIN "trades" t ON t."signalId" = s."id" AND t."status" = 'CLOSED'
+    GROUP BY s."source"
+    ORDER BY "signals" DESC
+  `);
+}
+
+// ─── Воронка сигналів ─────────────────────────────────────────────────────────
+
+/**
+ * Скільки сигналів відхилено і чому.
+ *
+ * Причини нормалізуються до префікса: тексти містять конкретні числа
+ * ("Ціна пішла на 6.07% від зони"), тому без цього кожен рядок був би
+ * унікальним і згрупувати їх не вийшло б.
  */
 export async function signalRejectionStats() {
-  return db.query(`
+  return select(`
     SELECT
-      reject_reason,
-      COUNT(*) AS count,
-      symbol
-    FROM signals
-    WHERE status = 'REJECTED'
-    GROUP BY reject_reason, symbol
-    ORDER BY count DESC
+      SUBSTR("rejectReason", 1, 40) AS "reasonPrefix",
+      COUNT(*)                      AS "count"
+    FROM "signals"
+    WHERE "status" = 'REJECTED'
+      AND "rejectReason" IS NOT NULL
+    GROUP BY "reasonPrefix"
+    ORDER BY "count" DESC
     LIMIT 50
-  `, { type: QueryTypes.SELECT });
+  `);
 }
 
 /**
- * Загальне equity curve (кумулятивний PnL по часу).
- * Готово для побудови графіку.
+ * Воронка рішень із signal_evaluations — де саме гинуть сигнали.
+ *
+ * На відміну від signalRejectionStats дає ще й ринковий контекст відмови:
+ * який був R:R, чи була ціна в зоні, який стоп планувався.
+ */
+export async function evaluationFunnel() {
+  return select(`
+    SELECT
+      "source",
+      "decision",
+      COUNT(*)                          AS "count",
+      ROUND(AVG("weightedRR"), 2)       AS "avgWeightedRR",
+      ROUND(AVG("slDistancePct"), 2)    AS "avgSlDistancePct",
+      SUM(CASE WHEN "inZone" = 1 THEN 1 ELSE 0 END) AS "inZoneCount"
+    FROM "signal_evaluations"
+    GROUP BY "source", "decision"
+    ORDER BY "source" ASC, "count" DESC
+  `);
+}
+
+/**
+ * Найчастіші причини відмови з контекстом — що саме відсіює фільтри.
+ */
+export async function rejectionReasons() {
+  return select(`
+    SELECT
+      SUBSTR("reason", 1, 40)        AS "reasonPrefix",
+      COUNT(*)                       AS "count",
+      ROUND(AVG("weightedRR"), 2)    AS "avgWeightedRR",
+      ROUND(AVG("slDistancePct"), 2) AS "avgSlDistancePct"
+    FROM "signal_evaluations"
+    WHERE "decision" = 'REJECTED' AND "reason" IS NOT NULL
+    GROUP BY "reasonPrefix"
+    ORDER BY "count" DESC
+    LIMIT 50
+  `);
+}
+
+// ─── Equity ───────────────────────────────────────────────────────────────────
+
+/**
+ * Кумулятивний PnL по часу — готове до побудови графіка.
  */
 export async function equityCurve() {
-  return db.query(`
+  return select(`
     SELECT
-      closed_at                                          AS ts,
-      profit_usdt,
-      SUM(profit_usdt) OVER (ORDER BY closed_at)        AS cumulative_pnl,
-      symbol,
-      close_reason
-    FROM trades
-    WHERE status = 'CLOSED'
-      AND profit_usdt IS NOT NULL
-    ORDER BY closed_at ASC
-  `, { type: QueryTypes.SELECT });
+      "closedAt"                                        AS "ts",
+      "profitUsdt",
+      SUM("profitUsdt") OVER (ORDER BY "closedAt")      AS "cumulativePnl",
+      "symbol",
+      "closeReason"
+    FROM "trades"
+    WHERE "status" = 'CLOSED'
+      AND "profitUsdt" IS NOT NULL
+    ORDER BY "closedAt" ASC
+  `);
 }

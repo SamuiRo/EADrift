@@ -44,14 +44,14 @@ partial close потрібен `syncProtectiveOrders(symbol)` для переб�
 
 Потрібен reconciliation flow на основі positions, open orders та income/order history.
 
-### 6. Analytics raw SQL використовує неправильні назви колонок
+### 6. ~~Analytics raw SQL використовує неправильні назви колонок~~ — виправлено
 
-Підтверджено звіркою з фактичною схемою: колонки в SQLite camelCase
-(`entryPrice`, `profitR`, `tradeId`), а raw SQL у `analytics.js` звертається до
-`entry_price`, `profit_r`, `trade_id`. Кожен звіт на raw SQL кидає помилку при
-першому виклику.
+Усі запити переведені на фактичні camelCase-колонки в подвійних лапках,
+додані `sourceStats`, `evaluationFunnel` і `rejectionReasons`, з'явилися точки
+входу — `npm run report` і Telegram-команда `/stats`.
 
-Потрібно уніфікувати mapping. Аналітичні функції також не мають CLI/API/Telegram entry point.
+`test/analytics.test.js` проганяє кожен звіт по реальній схемі на засіяних
+даних, тому повторне розходження схеми й запиту впаде на тестах.
 
 ### 7. Signal parser жорстко прив'язаний до формату каналу
 
@@ -128,10 +128,8 @@ type checking, CI workflow або Binance integration-тестів. Біржов
 
 ## Рекомендований порядок покращень
 
-1. Реєстратор для збору статистики: режим, що проганяє весь конвеєр і логує
-   рішення, але не шле ордери.
-2. Виправити analytics SQL — зараз усі raw-SQL звіти непрацездатні.
-3. Додати reconciliation/sync protective orders після ручних змін позиції.
-4. Виправити LIMIT timeout із гарантованим cancel.
-5. Додати integration-тести Binance adapter з mocks і testnet smoke-test.
-6. Персистити runtime mode/trailing state, якщо це потрібно операційно.
+1. Накопичити вибірку: `/mode shadow` на сервері, потім `npm run replay`.
+2. Додати reconciliation/sync protective orders після ручних змін позиції.
+3. Виправити LIMIT timeout із гарантованим cancel.
+4. Додати integration-тести Binance adapter з mocks і testnet smoke-test.
+5. Персистити runtime mode/trailing state, якщо це потрібно операційно.

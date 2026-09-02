@@ -21,7 +21,12 @@ import defineSlHistory  from './models/SlHistory.js';
 import defineSignalEvaluation from './models/SignalEvaluation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH   = path.resolve(__dirname, '../../data/trading.db');
+
+// Шлях можна перевизначити через EADRIFT_DB_PATH — це потрібно тестам, щоб не
+// писати в робочу базу, і зручно для роботи з копією даних із сервера.
+const DB_PATH = process.env.EADRIFT_DB_PATH
+  ? path.resolve(process.env.EADRIFT_DB_PATH)
+  : path.resolve(__dirname, '../../data/trading.db');
 
 // ─── Sequelize instance ───────────────────────────────────────────────────────
 
@@ -125,7 +130,9 @@ async function runColumnMigrations() {
 
     } catch (err) {
       // Відсутня таблиця на порожній БД — не помилка: sync створить її зі схеми.
-      if (/no such table/i.test(err.message)) continue;
+      // Sequelize формулює це по-різному залежно від діалекту, тож перевіряємо
+      // обидва варіанти: SQLite віддає "No description found for ... table".
+      if (/no such table|no description found/i.test(err.message)) continue;
       logger.error('Database migration failed', { table, column, err: err.message });
       throw err;
     }

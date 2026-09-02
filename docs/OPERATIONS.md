@@ -50,6 +50,7 @@ npm run dev
 | `MONITOR_INTERVAL_MS` | `5000` | інтервал position monitor |
 | `CONFIRM_MAX_PRICE_MOVE_PCT` | `0.005` | максимальна зміна ціни між оцінкою та підтвердженням; `0.005` = 0.5% |
 | `LOG_LEVEL` | `info` | рівень Winston; `debug` також вмикає SQL logs |
+| `EADRIFT_DB_PATH` | `src/data/trading.db` | шлях до SQLite-файлу; використовується тестами й для роботи з копією бази |
 | `NODE_ENV` | немає | експортується, але логіку не змінює |
 | `DEFAULT_POSITION_SIZE_USDT` | `"20"` | експортується, але зараз не використовується |
 
@@ -75,6 +76,7 @@ npm run dev
 | `/orders [SYMBOL]` | відкриті orders |
 | `/balance` | ненульові Futures balances |
 | `/watch` | in-memory watchlist |
+| `/stats` | статистика закритих угод: win rate, середній R, досягнення TP, розріз по джерелах |
 | `/sl SYMBOL PRICE` | замінити поточний STOP_MARKET |
 | `/be SYMBOL` | перенести SL у BE+ |
 | `/close SYMBOL FRACTION` | reduce-only MARKET close, fraction `(0, 1]` |
@@ -103,6 +105,21 @@ npm run replay -- --detail
 
 Прапорці: `--source` (фільтр по джерелу), `--since YYYY-MM-DD`, `--horizon N`
 (днів утримання, типово 14), `--detail` (рядок на кожен сигнал).
+
+Готові аналітичні звіти по вже закритих угодах:
+
+```bash
+npm run report
+npm run report -- --only tpHitRate,sourceStats
+npm run report -- --json
+```
+
+Обидва скрипти читають БД за шляхом `EADRIFT_DB_PATH`, якщо змінна задана.
+Це зручно для роботи з копією бази з сервера:
+
+```bash
+EADRIFT_DB_PATH=./dump.db npm run report
+```
 
 Політики виходу відкалібровані на невеликій вибірці одного джерела. Доки в
 `signal_evaluations` не набереться кількадесят записів, різницю між політиками

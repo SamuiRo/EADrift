@@ -13,6 +13,7 @@
  * /close <symbol> <fraction>    — частково закрити позицію (напр. 0.5 = 50%)
  * /mode <mode>                  — shadow | full_auto | semi_auto | confirm | pause
  * /status                       — поточний режим + баланс
+ * /stats                        — статистика закритих угод із БД
  */
 
 import { getBot, adminOnly, sendMarkdown, formatPosition } from './telegram.js';
@@ -29,6 +30,7 @@ import {
 import { getWatchlist, updateWatchedSL } from '../core/positionMonitor.js';
 import { getMode, setMode, TRADING_MODES, MODE_LABELS } from '../core/tradingMode.js';
 import { RISK_CONFIG } from '../core/riskEngine.js';
+import { tpHitRate, closeReasonBreakdown, sourceStats } from '../module/db/analytics.js';
 import { normalizedTpShares } from '../core/exitStrategy.js';
 import { logger } from '../shared/logger.js';
 
@@ -39,6 +41,7 @@ export function registerCommands() {
 
   bot.onText(/\/start/,                adminOnly(handleStart));
   bot.onText(/\/status/,               adminOnly(handleStatus));
+  bot.onText(/\/stats/,                adminOnly(handleStats));
   bot.onText(/\/mode (.+)/,            adminOnly(handleMode));
   bot.onText(/\/positions?/,           adminOnly(handlePositions));
   bot.onText(/\/orders?(.*)$/,         adminOnly(handleOrders));
@@ -73,6 +76,7 @@ async function handleStart(msg) {
     `\`/orders [SYMBOL]\` — відкриті ордери`,
     `\`/balance\`         — баланс акаунту`,
     `\`/watch\`           — що відстежує монітор`,
+    `\`/stats\`           — статистика закритих угод`,
     ``,
     `*Управління SL:*`,
     `\`/sl BTCUSDT 67000\` — перенести SL`,
@@ -127,6 +131,53 @@ async function handleStatus(msg) {
 
   await sendMarkdown(text);
 }
+
+async function handleStats(msg) {
+  const [tp, reasons, sources] = await Promise.all([
+    tpHitRate().catch(() => null),
+    closeReasonBreakdown().catch(() => []),
+    sourceStats().catch(() => []),
+  ]);
+
+  if (!tp || !tp.total) {
+    await sendMarkdown(
+      '*Статистика*\n\n_Закритих угод ще немає._\n\n' +
+      'Збирати сигнали без ризику капіталом: `/mode shadow`'
+    );
+    return;
+  }
+
+  const lines = [
+    `*Статистика* — закритих угод: \`${tp.total}\``,
+    ``,
+    `Win rate  : \`${fmtPct(tp.winRatePct)}\``,
+    `Середній R: \`${fmtNum(tp.avgProfitR)}\``,
+    ``,
+    `*Досягнення TP:*`,
+    `TP1 \`${fmtPct(tp.tp1HitRate)}\`  TP2 \`${fmtPct(tp.tp2HitRate)}\``,
+    `TP3 \`${fmtPct(tp.tp3HitRate)}\`  TP4 \`${fmtPct(tp.tp4HitRate)}\``,
+  ];
+
+  if (reasons.length) {
+    lines.push('', '*Причини закриття:*');
+    for (const r of reasons.slice(0, 6)) {
+      lines.push(`\`${String(r.closeReason ?? '—').padEnd(24)}\` ${r.tradeCount} · ${fmtNum(r.avgProfitR)}R`);
+    }
+  }
+
+  const traded = sources.filter(s => s.trades > 0);
+  if (traded.length > 1) {
+    lines.push('', '*По джерелах:*');
+    for (const s of traded) {
+      lines.push(`\`${s.source}\` — ${s.trades} угод, ${fmtNum(s.avgR)}R, win ${fmtPct(s.winRate)}`);
+    }
+  }
+
+  await sendMarkdown(lines.join('\n'));
+}
+
+function fmtPct(value) { return value == null ? '—' : `${value}%`; }
+function fmtNum(value) { return value == null ? '—' : String(value); }
 
 async function handleMode(msg, match) {
   const input = match[1].trim().toLowerCase().replace(/[_\-]/g, '_');

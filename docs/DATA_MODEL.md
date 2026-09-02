@@ -163,7 +163,27 @@ DB-помилки в більшості update-функцій логуються
 - `signalRejectionStats`;
 - `equityCurve`.
 
-Вони не підключені до Telegram-команд або окремого CLI/API. Частина звітів використовує raw SQL; див. обмеження щодо назв колонок у [KNOWN_LIMITATIONS.md](./KNOWN_LIMITATIONS.md).
+До них додано:
+
+- `sourceStats` — результат у розрізі джерела сигналів;
+- `evaluationFunnel` — де саме гинуть сигнали, за даними `signal_evaluations`;
+- `rejectionReasons` — причини відмов із ринковим контекстом.
+
+Raw SQL звертається до колонок у подвійних лапках і camelCase — так, як вони
+фактично записані в SQLite при `underscored: false`. Тест
+`test/analytics.test.js` проганяє кожен звіт по реальній схемі й перевіряє
+значення на засіяних даних, тому розходження схеми й запиту не пройде непоміченим.
+
+Точки входу:
+
+```bash
+npm run report                    # усі звіти
+npm run report -- --only tpHitRate
+npm run report -- --json
+npm run report -- --list
+```
+
+У Telegram — команда `/stats` зі стислим зведенням.
 
 ## Відновлення та узгодженість
 

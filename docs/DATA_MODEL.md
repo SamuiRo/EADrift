@@ -7,6 +7,7 @@
 ```mermaid
 erDiagram
     signals ||--o| trades : "signalId"
+    signals ||--o{ signal_evaluations : "signalId"
     trades ||--o{ trade_events : "tradeId"
     trades ||--o{ sl_history : "tradeId"
 ```
@@ -41,6 +42,34 @@ PAUSED  створюється як PENDING і одразу оновлюєтьс
 
 `FAILED` означає, що сигнал був підтверджений або обраний для автовиконання,
 але створення позиції завершилося помилкою.
+
+## `signal_evaluations`
+
+Знімок рішення системи по сигналу разом із ринковим контекстом на той момент.
+Пишеться в усіх режимах, включно з `SHADOW`, і **включно з відхиленими сигналами** —
+без них не можна перевірити, чи правильними були відмови.
+
+Групи полів:
+
+| Група | Поля |
+|---|---|
+| Зв'язок | `signalId`, `symbol`, `side`, `source` |
+| Рішення | `decision`, `reason`, `tradingMode`, `evaluatedAt` |
+| Ринок | `markPrice`, `atr`, `interval` |
+| План входу | `entryType`, `entryPrice`, `inZone`, `slippagePct` |
+| Стоп | `providerSlPrice`, `plannedSlPrice`, `slSource`, `slDistancePct` |
+| Якість | `rrToTp1`, `weightedRR` |
+| Розмір | `quantity`, `leverage`, `positionUsdt`, `riskUsdt`, `balanceAvailable` |
+
+Значення `decision`:
+
+```text
+EXECUTED, CONFIRM_REQUESTED, REJECTED, SHADOW
+```
+
+Похідних величин (R, результат угоди) тут навмисно немає: вони рахуються офлайн
+зі свічок через `npm run replay`. Так політику виходу можна перевіряти заднім
+числом — зокрема ту, якої на момент запису ще не існувало.
 
 ## `trades`
 

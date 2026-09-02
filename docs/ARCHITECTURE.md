@@ -74,6 +74,8 @@ EADrift/
 │   ├── OPERATIONS.md
 │   └── KNOWN_LIMITATIONS.md
 ├── logs/                         # runtime-логи, створюються Winston
+├── scripts/
+│   └── replay.js                 # офлайн-перевірка політик виходу на зібраних сигналах
 ├── src/
 │   ├── bot/
 │   │   ├── commands.js           # admin slash-команди

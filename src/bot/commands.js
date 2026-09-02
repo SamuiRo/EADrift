@@ -11,7 +11,7 @@
  * /be <symbol>                  — перенести SL в BE+
  * /watch                        — що зараз відстежує монітор
  * /close <symbol> <fraction>    — частково закрити позицію (напр. 0.5 = 50%)
- * /mode <mode>                  — full_auto | semi_auto | confirm | pause
+ * /mode <mode>                  — shadow | full_auto | semi_auto | confirm | pause
  * /status                       — поточний режим + баланс
  */
 
@@ -65,6 +65,7 @@ async function handleStart(msg) {
     `\`/mode semi_auto\`  — автоматично якщо ризик ОК, інакше confirm`,
     `\`/mode confirm\`    — завжди чекати підтвердження`,
     `\`/mode pause\`      — ігнорувати всі сигнали`,
+    `\`/mode shadow\`     — рахувати все й записувати, але не торгувати`,
     ``,
     `*Перегляд:*`,
     `\`/status\`          — режим + баланс`,
@@ -131,6 +132,7 @@ async function handleMode(msg, match) {
   const input = match[1].trim().toLowerCase().replace(/[_\-]/g, '_');
 
   const map = {
+    'shadow':       TRADING_MODES.SHADOW,
     'full_auto':    TRADING_MODES.FULL_AUTO,
     'fullauto':     TRADING_MODES.FULL_AUTO,
     'semi_auto':    TRADING_MODES.SEMI_AUTO,
@@ -147,7 +149,7 @@ async function handleMode(msg, match) {
   if (!newMode) {
     await sendMarkdown(
       `_Невідомий режим: \`${input}\`_\n\n` +
-      `Доступні: \`full_auto\` | \`semi_auto\` | \`confirm\` | \`pause\``
+      `Доступні: \`shadow\` | \`full_auto\` | \`semi_auto\` | \`confirm\` | \`pause\``
     );
     return;
   }

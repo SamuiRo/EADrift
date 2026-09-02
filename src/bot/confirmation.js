@@ -41,7 +41,7 @@ import {
 } from '../core/riskEngine.js';
 import { normalizedTpShares } from '../core/exitStrategy.js';
 import {
-  getMode, isPaused, isFullAuto, isSemiAuto,
+  getMode, isPaused, isShadow, isFullAuto, isSemiAuto,
   TRADING_MODES, MODE_LABELS,
 } from '../core/tradingMode.js';
 import { logger } from '../shared/logger.js';
@@ -50,6 +50,8 @@ import {
   saveSignal,
   updateSignalStatus,
   openTrade,
+  recordEvaluation,
+  DECISIONS,
 } from '../module/db/tradeRepository.js';
 
 // ─── TTL ──────────────────────────────────────────────────────────────────────
@@ -59,6 +61,65 @@ const REMINDER_BEFORE_MS =  5 * 60 * 1000; // нагадування за 5 хв
 
 
 class ConfirmationRejectedError extends Error {}
+
+/**
+ * Звести контекст рішення до рядка signal_evaluations.
+ *
+ * Пишеться для кожного термінального рішення, включно з відхиленнями:
+ * саме відсіяні сигнали дають матеріал для питання "чи правильно пропустили".
+ */
+function evaluationRow(order, ctx, decision, reason = null) {
+  const { marketEntry, plan, risk, markPrice, atr, balance } = ctx;
+
+  return {
+    signalId:    order._signalDbId ?? null,
+    symbol:      order.symbol,
+    side:        order.side === 'BUY' ? 'LONG' : 'SHORT',
+    source:      order.source ?? 'unknown',
+    decision,
+    reason,
+    tradingMode: getMode(),
+
+    markPrice:   markPrice ?? null,
+    atr:         atr ?? null,
+    interval:    order.interval ?? null,
+
+    entryType:   order.entryType ?? null,
+    entryPrice:  order.entryPrice ?? null,
+    inZone:      marketEntry?.inZone ?? null,
+    slippagePct: marketEntry?.slippagePct ?? null,
+
+    providerSlPrice: order.providerSlPrice ?? order.slPrice ?? null,
+    plannedSlPrice:  plan?.slPrice ?? null,
+    slSource:        plan?.slSource ?? null,
+    slDistancePct:   plan?.slDistance && order.entryPrice
+      ? plan.slDistance / order.entryPrice * 100
+      : null,
+
+    rrToTp1:    plan?.rr?.[0] ?? null,
+    weightedRR: plan?.weightedRR ?? null,
+
+    quantity:         risk?.quantity ?? null,
+    leverage:         risk?.leverage ?? null,
+    positionUsdt:     risk?.positionUsdt ?? null,
+    riskUsdt:         risk?.realRiskUsdt ?? null,
+    balanceAvailable: balance?.available ?? null,
+  };
+}
+
+/** Відхилити сигнал: статус у БД, знімок рішення, повідомлення адміну. */
+async function rejectSignal(order, ctx, reason) {
+  logger.warn('Signal rejected', { symbol: order.symbol, reason });
+
+  await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
+  await recordEvaluation(evaluationRow(order, ctx, DECISIONS.REJECTED, reason));
+  await sendMarkdown(
+    `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
+    `*Причина:* ${reason}\n\n` +
+    `_Ордер не виставлено_`
+  );
+  return null;
+}
 
 // confirmId → { order, risk, marketEntry, evaluationPrice, messageId, expiresAt, resolved, timers }
 const pending = new Map();
@@ -102,6 +163,10 @@ export async function requestConfirmation(order) {
     });
   }
 
+  // Накопичувач контексту рішення — доповнюється в міру обчислень і
+  // записується в signal_evaluations на кожному термінальному виході.
+  const ctx = { markPrice: currentPrice, atr, balance, marketEntry: null, plan: null, risk: null };
+
   // ── PAUSED ─────────────────────────────────────────────────────────────────
   if (isPaused()) {
     logger.info('Signal ignored — bot is paused', { symbol: order.symbol, currentPrice });
@@ -130,14 +195,7 @@ export async function requestConfirmation(order) {
   order = { ...order, _signalDbId: signalRecord?.id ?? null };
 
   if (!order.tpPrices?.length) {
-    const reason = 'Signal has no take-profit levels';
-    await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
-    await sendMarkdown(
-      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
-      `*Причина:* ${reason}\n\n` +
-      `_Ордер не виставлено_`
-    );
-    return null;
+    return rejectSignal(order, ctx, 'Signal has no take-profit levels');
   }
 
   // ── Визначаємо ефективну ціну входу ──────────────────────────────────────
@@ -158,18 +216,11 @@ export async function requestConfirmation(order) {
       side:       order.side,
     });
 
+    ctx.marketEntry = marketEntry;
+
     if (!marketEntry.valid) {
       // Угода вже не валідна — відхиляємо без підтвердження
-      logger.warn('Signal invalidated by market entry check', {
-        symbol: order.symbol, reason: marketEntry.reason,
-      });
-      await updateSignalStatus(order._signalDbId, 'REJECTED', marketEntry.reason);
-      await sendMarkdown(
-        `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
-        `*Причина:* ${marketEntry.reason}\n\n` +
-        `_Ордер не виставлено_`
-      );
-      return null;
+      return rejectSignal(order, ctx, marketEntry.reason);
     }
 
     // Входимо по ринку і в зоні, і при виході з неї.
@@ -194,15 +245,10 @@ export async function requestConfirmation(order) {
   });
 
   if (!plan.ok) {
-    logger.warn('Signal rejected by entry plan', { symbol: order.symbol, reason: plan.reason });
-    await updateSignalStatus(order._signalDbId, 'REJECTED', plan.reason);
-    await sendMarkdown(
-      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
-      `*Причина:* ${plan.reason}\n\n` +
-      `_Ордер не виставлено_`
-    );
-    return null;
+    return rejectSignal(order, ctx, plan.reason);
   }
+
+  ctx.plan = plan;
 
   // SL провайдера лишається в записі сигналу; торгуємо власним.
   order = { ...order, providerSlPrice: order.slPrice, slPrice: plan.slPrice };
@@ -221,19 +267,10 @@ export async function requestConfirmation(order) {
 
   // Без валідного riskResult забороняємо виконання в будь-якому режимі.
   if (!riskResult) {
-    const reason = 'Risk calculation failed';
-    logger.error('Signal rejected: risk calculation unavailable', {
-      symbol: order.symbol,
-      signalDbId: order._signalDbId,
-    });
-    await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
-    await sendMarkdown(
-      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
-      `*Причина:* ${reason}\n\n` +
-      `_Ордер не виставлено_`
-    );
-    return null;
+    return rejectSignal(order, ctx, 'Risk calculation failed');
   }
+
+  ctx.risk = riskResult;
 
   const enrichedOrder = {
     ...order,
@@ -243,13 +280,29 @@ export async function requestConfirmation(order) {
 
   // ── REJECT від riskEngine ─────────────────────────────────────────────────
   if (riskResult?.status === VALIDATION.REJECT) {
-    logger.warn('Signal REJECTED by risk engine', {
-      symbol: order.symbol, reason: riskResult.reason,
+    return rejectSignal(order, ctx, riskResult.reason);
+  }
+
+  // ── SHADOW ────────────────────────────────────────────────────────────────
+  // Сигнал пройшов усі фільтри й був би виконаний. Ордер не виставляємо —
+  // записуємо повний знімок рішення, щоб офлайн порівняти з тим, що зробив ринок.
+  if (isShadow()) {
+    await updateSignalStatus(order._signalDbId, 'PAUSED', 'Shadow mode: recorded, not traded');
+    await recordEvaluation(evaluationRow(enrichedOrder, ctx, DECISIONS.SHADOW));
+
+    logger.info('SHADOW — recorded without trading', {
+      symbol:     order.symbol,
+      entryPrice: enrichedOrder.entryPrice,
+      slPrice:    plan.slPrice,
+      slSource:   plan.slSource,
+      weightedRR: Number(plan.weightedRR.toFixed(2)),
+      riskStatus: riskResult.status,
     });
-    await updateSignalStatus(order._signalDbId, 'REJECTED', riskResult.reason);
+
     await sendMarkdown(
-      `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
-      `*Причина:* ${riskResult.reason}\n\n` +
+      `👁 *${order.symbol}* — записано в shadow\n` +
+      `Вхід: \`${fmt(enrichedOrder.entryPrice)}\`  SL: \`${fmt(plan.slPrice)}\` _(${plan.slSource})_\n` +
+      `Зважений R:R: \`${plan.weightedRR.toFixed(2)}\`  Плече: \`${riskResult.leverage}x\`\n` +
       `_Ордер не виставлено_`
     );
     return null;
@@ -258,6 +311,7 @@ export async function requestConfirmation(order) {
   // ── FULL_AUTO ─────────────────────────────────────────────────────────────
   if (isFullAuto()) {
     logger.info('FULL_AUTO — executing immediately', { symbol: order.symbol });
+    await recordEvaluation(evaluationRow(enrichedOrder, ctx, DECISIONS.EXECUTED));
     await executeAndNotify(enrichedOrder, riskResult, balance);
     return null;
   }
@@ -268,6 +322,7 @@ export async function requestConfirmation(order) {
     const autoOk = riskResult?.status === VALIDATION.OK && marketEntry?.inZone === true;
     if (autoOk) {
       logger.info('SEMI_AUTO — conditions OK, executing immediately', { symbol: order.symbol });
+      await recordEvaluation(evaluationRow(enrichedOrder, ctx, DECISIONS.EXECUTED));
       await executeAndNotify(enrichedOrder, riskResult, balance);
       return null;
     }
@@ -279,6 +334,7 @@ export async function requestConfirmation(order) {
   }
 
   // ── CONFIRM ───────────────────────────────────────────────────────────────
+  await recordEvaluation(evaluationRow(enrichedOrder, ctx, DECISIONS.CONFIRM_REQUESTED));
   return showConfirmCard(enrichedOrder, riskResult, marketEntry, currentPrice, balance, plan);
 }
 

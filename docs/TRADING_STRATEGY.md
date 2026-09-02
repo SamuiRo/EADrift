@@ -119,6 +119,7 @@ realRiskUsdt = quantity × entryPrice × delta
 | `SEMI_AUTO` | auto лише коли risk=`OK` і mark price усередині entry zone |
 | `FULL_AUTO` | кожен валідний не-`REJECT` сигнал виконується одразу |
 | `PAUSED` | сигнал зберігається зі статусом `PAUSED`, ордер не створюється |
+| `SHADOW` | сигнал проходить усі фільтри, рішення пишеться в `signal_evaluations`, ордер не створюється |
 
 Типовий режим після запуску: `CONFIRM_ONLY`.
 

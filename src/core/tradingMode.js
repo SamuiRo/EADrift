@@ -3,6 +3,7 @@
  *
  * Управління режимами торгівлі.
  *
+ * SHADOW       — проганяти весь конвеєр і записувати рішення, але не торгувати
  * FULL_AUTO    — виконувати всі сигнали автоматично (тільки REJECT блокує)
  * SEMI_AUTO    — автоматично якщо riskEngine повертає OK,
  *                інакше кидати на підтвердження з подовженим TTL
@@ -14,6 +15,7 @@
  */
 
 export const TRADING_MODES = {
+    SHADOW:       'SHADOW',
     FULL_AUTO:    'FULL_AUTO',
     SEMI_AUTO:    'SEMI_AUTO',
     CONFIRM_ONLY: 'CONFIRM_ONLY',
@@ -32,11 +34,13 @@ export const TRADING_MODES = {
   }
   
   export function isPaused()        { return currentMode === TRADING_MODES.PAUSED; }
+  export function isShadow()        { return currentMode === TRADING_MODES.SHADOW; }
   export function isFullAuto()      { return currentMode === TRADING_MODES.FULL_AUTO; }
   export function isSemiAuto()      { return currentMode === TRADING_MODES.SEMI_AUTO; }
   export function isConfirmOnly()   { return currentMode === TRADING_MODES.CONFIRM_ONLY; }
   
   export const MODE_LABELS = {
+    [TRADING_MODES.SHADOW]:       '👁 Shadow',
     [TRADING_MODES.FULL_AUTO]:    '🤖 Full Auto',
     [TRADING_MODES.SEMI_AUTO]:    '⚡ Semi Auto',
     [TRADING_MODES.CONFIRM_ONLY]: '✋ Confirm Only',

@@ -63,6 +63,7 @@ flowchart TD
     P --> G["calcFromBalance"]
     G -->|calculation failed or REJECT| R2["Signal REJECTED"]
     G --> H{"Trading mode"}
+    H -->|SHADOW| SH["Record evaluation, no order"]
     H -->|FULL_AUTO| X["Execute immediately"]
     H -->|"SEMI_AUTO + risk OK + in zone"| X
     H -->|SEMI_AUTO otherwise| K["Confirmation card"]

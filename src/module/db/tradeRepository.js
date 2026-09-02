@@ -9,12 +9,13 @@
  */
 
 import { Op } from 'sequelize';
-import { Signal, Trade, TradeEvent, SlHistory } from './database.js';
+import { Signal, Trade, TradeEvent, SlHistory, SignalEvaluation } from './database.js';
 import { EVENT_TYPES } from './models/TradeEvent.js';
 import { SL_MOVE_REASONS } from './models/SlHistory.js';
+import { DECISIONS } from './models/SignalEvaluation.js';
 import { logger } from '../../shared/logger.js';
 
-export { EVENT_TYPES, SL_MOVE_REASONS };
+export { EVENT_TYPES, SL_MOVE_REASONS, DECISIONS };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SIGNALS
@@ -72,6 +73,25 @@ export async function updateSignalStatus(signalDbId, status, rejectReason = null
     );
   } catch (err) {
     logger.error('updateSignalStatus failed', { err: err.message, signalDbId, status });
+  }
+}
+
+/**
+ * Записати знімок рішення по сигналу — включно з відхиленими.
+ *
+ * Свідомо ніколи не кидає: збір статистики не має права зупинити торгівлю
+ * або завалити обробку сигналу.
+ *
+ * @param {object} p  поля моделі SignalEvaluation
+ */
+export async function recordEvaluation(p) {
+  try {
+    await SignalEvaluation.create({ ...p, evaluatedAt: new Date() });
+    logger.debug('Evaluation recorded', {
+      symbol: p.symbol, decision: p.decision, reason: p.reason ?? null,
+    });
+  } catch (err) {
+    logger.error('recordEvaluation failed', { err: err.message, symbol: p?.symbol });
   }
 }
 

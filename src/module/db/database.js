@@ -18,6 +18,7 @@ import defineSignal     from './models/Signal.js';
 import defineTrade      from './models/Trade.js';
 import defineTradeEvent from './models/TradeEvent.js';
 import defineSlHistory  from './models/SlHistory.js';
+import defineSignalEvaluation from './models/SignalEvaluation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH   = path.resolve(__dirname, '../../data/trading.db');
@@ -47,6 +48,7 @@ export const Signal     = defineSignal(db);
 export const Trade      = defineTrade(db);
 export const TradeEvent = defineTradeEvent(db);
 export const SlHistory  = defineSlHistory(db);
+export const SignalEvaluation = defineSignalEvaluation(db);
 
 // ─── Асоціації ────────────────────────────────────────────────────────────────
 
@@ -61,6 +63,10 @@ TradeEvent.belongsTo(Trade, { foreignKey: 'tradeId', as: 'trade' });
 // Trade → SlHistory
 Trade.hasMany(SlHistory, { foreignKey: 'tradeId', as: 'slMoves' });
 SlHistory.belongsTo(Trade, { foreignKey: 'tradeId', as: 'trade' });
+
+// Signal → SignalEvaluation (сигнал може оцінюватись повторно — напр. при підтвердженні)
+Signal.hasMany(SignalEvaluation, { foreignKey: 'signalId', as: 'evaluations' });
+SignalEvaluation.belongsTo(Signal, { foreignKey: 'signalId', as: 'signal' });
 
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 

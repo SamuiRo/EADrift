@@ -102,6 +102,24 @@ export async function initDatabase({ alter = false } = {}) {
 }
 
 /**
+ * Зняти консистентну копію бази, не зупиняючи бот.
+ *
+ * VACUUM INTO пише знімок у транзакції, тому копія цілісна навіть якщо саме
+ * зараз записується новий сигнал. Простий `cp` працюючого файлу такої
+ * гарантії не дає.
+ *
+ * @param {string} targetPath куди записати копію (файл не повинен існувати)
+ * @returns {Promise<string>} абсолютний шлях до копії
+ */
+export async function exportDatabase(targetPath) {
+  const absolute = path.resolve(targetPath);
+  // SQLite приймає шлях як рядковий літерал: прямі слеші й екранування лапок.
+  const literal = absolute.split(path.sep).join('/').replace(/'/g, "''");
+  await db.query(`VACUUM INTO '${literal}'`);
+  return absolute;
+}
+
+/**
  * Додати колонки, яких бракує в уже існуючій БД.
  *
  * `db.sync({ alter: false })` створює відсутні таблиці, але не змінює наявні,

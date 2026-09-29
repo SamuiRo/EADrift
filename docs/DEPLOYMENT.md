@@ -85,6 +85,9 @@ pm2 startup        # виконати команду, яку він надрук
 - [ ] `pm2 logs` містить `Channel listener started`.
 - [ ] Перешліть боту будь-який старий сигнал — має прийти shadow-запис або відмова.
 - [ ] `npm run report -- --only evaluationFunnel` показує цей запис.
+- [ ] `/export` надсилає файл бази.
+
+Як далі працювати з даними: [DATA_COLLECTION.md](./DATA_COLLECTION.md).
 
 ## 8. Резервні копії
 

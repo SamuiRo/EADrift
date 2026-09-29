@@ -14,9 +14,14 @@
  * /mode <mode>                  — shadow | full_auto | semi_auto | confirm | pause
  * /status                       — поточний режим + баланс
  * /stats                        — статистика закритих угод із БД
+ * /export                       — надіслати копію бази даних файлом
  */
 
-import { getBot, adminOnly, sendMarkdown, formatPosition } from './telegram.js';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+import { getBot, adminOnly, sendMarkdown, sendAdminDocument, formatPosition } from './telegram.js';
+import { exportDatabase } from '../module/db/database.js';
 import {
   getOpenPositions,
   getOpenOrders,
@@ -42,6 +47,7 @@ export function registerCommands() {
   bot.onText(/\/start/,                adminOnly(handleStart));
   bot.onText(/\/status/,               adminOnly(handleStatus));
   bot.onText(/\/stats/,                adminOnly(handleStats));
+  bot.onText(/\/export/,               adminOnly(handleExport));
   bot.onText(/\/mode (.+)/,            adminOnly(handleMode));
   bot.onText(/\/positions?/,           adminOnly(handlePositions));
   bot.onText(/\/orders?(.*)$/,         adminOnly(handleOrders));
@@ -77,6 +83,7 @@ async function handleStart(msg) {
     `\`/balance\`         — баланс акаунту`,
     `\`/watch\`           — що відстежує монітор`,
     `\`/stats\`           — статистика закритих угод`,
+    `\`/export\`          — копія бази даних файлом`,
     ``,
     `*Управління SL:*`,
     `\`/sl BTCUSDT 67000\` — перенести SL`,
@@ -176,6 +183,25 @@ async function handleStats(msg) {
   }
 
   await sendMarkdown(lines.join('\n'));
+}
+
+async function handleExport(msg) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const name  = `eadrift-${stamp}.db`;
+  const file  = path.join(os.tmpdir(), name);
+
+  try {
+    await exportDatabase(file);
+    const sizeKb = Math.round(fs.statSync(file).size / 1024);
+    await sendAdminDocument(
+      file,
+      `Копія бази EADrift, ${sizeKb} KB.\n` +
+      `Локально: EADRIFT_DB_PATH=./${name} npm run replay -- --detail`,
+      name,
+    );
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
 }
 
 function fmtPct(value) { return value == null ? '—' : `${value}%`; }

@@ -186,3 +186,23 @@ test('equityCurve accumulates PnL in chronological order', async () => {
   const last = rows.at(-1);
   assert.ok(Math.abs(last.cumulativePnl - 0.65) < 1e-9, `got ${last.cumulativePnl}`);
 });
+
+test('exportDatabase writes a complete, readable SQLite copy', async () => {
+  const { exportDatabase } = await import('../src/module/db/database.js');
+  const target = path.join(os.tmpdir(), `eadrift-export-${process.pid}-${Date.now()}.db`);
+
+  try {
+    await exportDatabase(target);
+    const header = fs.readFileSync(target).subarray(0, 15).toString('latin1');
+    assert.equal(header, 'SQLite format 3');
+
+    // Копія має містити ті самі дані, що й оригінал.
+    const { Sequelize, QueryTypes } = await import('sequelize');
+    const copy = new Sequelize({ dialect: 'sqlite', storage: target, logging: false });
+    const [row] = await copy.query('SELECT COUNT(*) AS n FROM "trades"', { type: QueryTypes.SELECT });
+    await copy.close();
+    assert.equal(row.n, 2);
+  } finally {
+    fs.rmSync(target, { force: true });
+  }
+});

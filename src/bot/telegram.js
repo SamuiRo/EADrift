@@ -80,6 +80,24 @@ export async function sendAdmin(text, extra = {}) {
 }
 
 /**
+ * Відправити файл адміну. Лише в адмін-чат — інших адресатів тут немає.
+ */
+export async function sendAdminDocument(filePath, caption = '', fileName = undefined) {
+  const b = getBot();
+  try {
+    return await b.sendDocument(
+      TELEGRAM_ADMIN_CHAT_ID,
+      filePath,
+      { caption },
+      { filename: fileName, contentType: 'application/octet-stream' },
+    );
+  } catch (err) {
+    logger.error('sendAdminDocument failed', { err: err.message });
+    throw err;
+  }
+}
+
+/**
  * Відправити Markdown-повідомлення адміну.
  */
 export async function sendMarkdown(text, extra = {}) {

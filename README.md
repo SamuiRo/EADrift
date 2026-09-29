@@ -57,6 +57,9 @@ Stop-loss розраховується самостійно від фактич�
 - [Запуск та експлуатація](./docs/OPERATIONS.md)
 - [Відомі обмеження](./docs/KNOWN_LIMITATIONS.md)
 - [Розгортання на сервері](./docs/DEPLOYMENT.md)
+- [Збір і аналіз даних](./docs/DATA_COLLECTION.md)
+- [Історія покращень](./docs/HISTORY.md)
+- [Changelog](./CHANGELOG.md)
 
 ## Технології
 
@@ -72,7 +75,9 @@ Stop-loss розраховується самостійно від фактич�
 
 ```text
 /status
-/mode full_auto|semi_auto|confirm|pause
+/stats
+/export
+/mode shadow|full_auto|semi_auto|confirm|pause
 /positions
 /orders [SYMBOL]
 /watch

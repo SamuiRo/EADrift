@@ -81,6 +81,7 @@ npm run dev
 | `/orders [SYMBOL]` | відкриті orders |
 | `/balance` | ненульові Futures balances |
 | `/watch` | in-memory watchlist |
+| `/export` | копія бази даних файлом у чат адміністратора |
 | `/stats` | статистика закритих угод: win rate, середній R, досягнення TP, розріз по джерелах |
 | `/sl SYMBOL PRICE` | замінити поточний STOP_MARKET |
 | `/be SYMBOL` | перенести SL у BE+ |

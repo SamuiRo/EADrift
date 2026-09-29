@@ -56,6 +56,7 @@ Stop-loss розраховується самостійно від фактич�
 - [Модель даних](./docs/DATA_MODEL.md)
 - [Запуск та експлуатація](./docs/OPERATIONS.md)
 - [Відомі обмеження](./docs/KNOWN_LIMITATIONS.md)
+- [Розгортання на сервері](./docs/DEPLOYMENT.md)
 
 ## Технології
 

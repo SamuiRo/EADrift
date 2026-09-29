@@ -23,6 +23,48 @@ export const APP_VERSION               = pkg.version;
 export const PKG               = pkg;
 export const DEFAULT_POSITION_SIZE_USDT = process.env.DEFAULT_POSITION_SIZE_USDT || "20";
 
+// ─── Капітал і портфельні ліміти ──────────────────────────────────────────────
+
+/** Число з env з перевіркою; некоректне значення не зупиняє бот, а дає дефолт. */
+function envNumber(name, fallback, { min = 0 } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min) {
+    logger.warn(`Invalid ${name}="${raw}", using default ${fallback}`);
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Скільки USDT бот вважає своїм капіталом, навіть якщо на рахунку більше.
+ * Ризик, розмір позиції й маржа рахуються від min(баланс, ця межа).
+ */
+export const CAPITAL_CAP_USDT = envNumber('CAPITAL_CAP_USDT', 1000, { min: 1 });
+
+/**
+ * Скільки позицій може бути відкрито одночасно. Капітал ділиться на стільки
+ * маржинальних слотів, тому це ж значення визначає плече.
+ */
+export const MAX_OPEN_POSITIONS = Math.floor(envNumber('MAX_OPEN_POSITIONS', 3, { min: 1 }));
+
+// ─── Стартовий режим ──────────────────────────────────────────────────────────
+
+const STARTUP_MODES = ['SHADOW', 'CONFIRM_ONLY', 'SEMI_AUTO', 'FULL_AUTO', 'PAUSED'];
+
+/**
+ * Режим, у якому бот стартує. Без цього будь-який рестарт процесу повертав
+ * бота в CONFIRM_ONLY — на сервері це тихо зупиняло б збір даних у SHADOW.
+ */
+export const STARTUP_TRADING_MODE = (() => {
+  const raw = (process.env.STARTUP_TRADING_MODE || 'CONFIRM_ONLY').trim().toUpperCase();
+  if (STARTUP_MODES.includes(raw)) return raw;
+  logger.warn(`Invalid STARTUP_TRADING_MODE="${raw}", falling back to CONFIRM_ONLY`);
+  return 'CONFIRM_ONLY';
+})();
+
 // ─── Env check ────────────────────────────────────────────────────────────────
 
 const required = [

@@ -10,6 +10,7 @@
 4. [DATA_MODEL.md](./DATA_MODEL.md) — SQLite/Sequelize, таблиці, статуси, події та аналітика.
 5. [OPERATIONS.md](./OPERATIONS.md) — конфігурація, запуск, Telegram-команди та експлуатація.
 6. [KNOWN_LIMITATIONS.md](./KNOWN_LIMITATIONS.md) — відомі ризики, технічний борг і напрямки розвитку.
+7. [DEPLOYMENT.md](./DEPLOYMENT.md) — розгортання на сервері для збору даних.
 
 ## Коротко про систему
 

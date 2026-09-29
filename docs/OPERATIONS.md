@@ -7,6 +7,8 @@
 - Telegram Bot token і admin chat ID;
 - для читання каналу: Telegram API ID/hash, MTProto session string і channel ID.
 
+Розгортання на сервері описане окремо: [DEPLOYMENT.md](./DEPLOYMENT.md).
+
 ## Встановлення та запуск
 
 ```bash
@@ -50,6 +52,9 @@ npm run dev
 | `MONITOR_INTERVAL_MS` | `5000` | інтервал position monitor |
 | `CONFIRM_MAX_PRICE_MOVE_PCT` | `0.005` | максимальна зміна ціни між оцінкою та підтвердженням; `0.005` = 0.5% |
 | `LOG_LEVEL` | `info` | рівень Winston; `debug` також вмикає SQL logs |
+| `STARTUP_TRADING_MODE` | `CONFIRM_ONLY` | режим після кожного старту процесу; на сервері для збору даних — `SHADOW` |
+| `CAPITAL_CAP_USDT` | `1000` | максимум капіталу, від якого рахуються ризик, розмір і маржа |
+| `MAX_OPEN_POSITIONS` | `3` | скільки позицій одночасно; визначає розмір маржинального слота |
 | `EADRIFT_DB_PATH` | `src/data/trading.db` | шлях до SQLite-файлу; використовується тестами й для роботи з копією бази |
 | `NODE_ENV` | немає | експортується, але логіку не змінює |
 | `DEFAULT_POSITION_SIZE_USDT` | `"20"` | експортується, але зараз не використовується |

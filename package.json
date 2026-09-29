@@ -1,15 +1,19 @@
 {
     "name": "eadrift",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "description": "Binance Futures + Telegram trading bot",
     "main": "src/index.js",
     "type": "module",
+    "engines": {
+        "node": ">=20.10"
+    },
     "scripts": {
         "start": "node src/index.js",
         "dev": "node --watch src/index.js",
         "test": "node --test",
         "replay": "node scripts/replay.js",
-        "report": "node scripts/report.js"
+        "report": "node scripts/report.js",
+        "auth": "node scripts/auth.js"
     },
     "dependencies": {
         "@binance/connector": "^3.4.0",

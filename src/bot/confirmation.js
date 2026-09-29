@@ -31,13 +31,14 @@ import {
   getAccountBalance,
   getATR,
 } from '../exchanges/binance.js';
-import { watchPosition } from '../core/positionMonitor.js';
+import { watchPosition, getWatchlist } from '../core/positionMonitor.js';
 import {
   calcFromBalance,
   applyLeverage,
   validateMarketEntry,
   planEntry,
   VALIDATION,
+  RISK_CONFIG,
 } from '../core/riskEngine.js';
 import { normalizedTpShares } from '../core/exitStrategy.js';
 import {
@@ -118,6 +119,29 @@ async function rejectSignal(order, ctx, reason) {
     `*Причина:* ${reason}\n\n` +
     `_Ордер не виставлено_`
   );
+  return null;
+}
+
+/**
+ * Чи дозволяє поточний портфель відкрити ще одну позицію.
+ *
+ * Повертає причину відмови або null. Watchlist — те, що бот відкрив і веде;
+ * ручні позиції поза ботом сюди не потрапляють.
+ */
+function checkPortfolioLimits(symbol) {
+  const watched = getWatchlist();
+
+  // Binance у one-way режимі долив би новий ордер до наявної позиції, а
+  // watchlist, де ключ — символ, мовчки перезатер би стару угоду.
+  if (watched[symbol]) {
+    return `Позиція по ${symbol} вже відкрита — повторний сигнал не торгуємо`;
+  }
+
+  const open = Object.keys(watched).length;
+  if (open >= RISK_CONFIG.maxOpenPositions) {
+    return `Досягнуто ліміт одночасних позицій: ${open}/${RISK_CONFIG.maxOpenPositions}`;
+  }
+
   return null;
 }
 
@@ -281,6 +305,14 @@ export async function requestConfirmation(order) {
   // ── REJECT від riskEngine ─────────────────────────────────────────────────
   if (riskResult?.status === VALIDATION.REJECT) {
     return rejectSignal(order, ctx, riskResult.reason);
+  }
+
+  // ── Портфельні межі ───────────────────────────────────────────────────────
+  // У SHADOW позицій не відкривається, тож ці межі там не спрацьовують —
+  // і правильно: інакше вибірка залежала б від уявних позицій.
+  const portfolioBlock = checkPortfolioLimits(order.symbol);
+  if (portfolioBlock) {
+    return rejectSignal(order, ctx, portfolioBlock);
   }
 
   // ── SHADOW ────────────────────────────────────────────────────────────────
@@ -643,6 +675,10 @@ async function recheckBeforeExecution(entry) {
   });
 
   if (!plan.ok) throw new ConfirmationRejectedError(plan.reason);
+
+  // За час життя картки могла відкритися інша позиція — перевіряємо знову.
+  const portfolioBlock = checkPortfolioLimits(order.symbol);
+  if (portfolioBlock) throw new ConfirmationRejectedError(portfolioBlock);
 
   order = { ...order, providerSlPrice: order.providerSlPrice ?? order.slPrice, slPrice: plan.slPrice };
 

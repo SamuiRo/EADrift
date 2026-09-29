@@ -112,7 +112,11 @@ test('leverage below 1x does not inflate the position to the full balance', asyn
 
   assert.notEqual(result.status, VALIDATION.REJECT);
   assert.ok(result.positionUsdt < balance, 'position must stay smaller than the account');
-  assert.equal(result.leverage, 1, 'sub-1x demand is satisfied by 1x leverage');
+
+  // Плече рахується від маржинального слота, а не від усього балансу.
+  const slot = balance / RISK_CONFIG.maxOpenPositions;
+  assert.equal(result.leverage, Math.ceil(result.positionUsdt / slot));
+  assert.ok(result.marginUsdt <= slot + 1e-9, 'margin must fit into one slot');
   assert.ok(
     Math.abs(result.realRiskUsdt - targetRisk) / targetRisk < 0.15,
     `real risk ${result.realRiskUsdt.toFixed(2)} should track target ${targetRisk.toFixed(2)}`,
@@ -154,4 +158,58 @@ test('rejects a stop-loss wider than the configured band', async () => {
   });
 
   assert.equal(result.status, VALIDATION.REJECT);
+});
+
+// ─── Капітал і маржа ──────────────────────────────────────────────────────────
+
+test('money above the capital cap is ignored', async () => {
+  // На рахунку може бути більше, ніж дозволено боту. Ризик і розмір мусять
+  // рахуватися від межі, а не від фактичного балансу.
+  const cfg = { capitalCapUsdt: 1000, maxOpenPositions: 3 };
+  const rich = await calculatePosition({
+    balance: 25000, entryPrice: 593.83, slPrice: 582.28, symbol: 'BNBUSDT', symbolInfo: INFO, config: cfg,
+  });
+  const capped = await calculatePosition({
+    balance: 1000, entryPrice: 593.83, slPrice: 582.28, symbol: 'BNBUSDT', symbolInfo: INFO, config: cfg,
+  });
+
+  assert.equal(rich.capital, 1000);
+  assert.equal(rich.targetRiskUsdt, 1000 * RISK_CONFIG.riskPct);
+  assert.equal(rich.quantity, capped.quantity);
+  assert.equal(rich.leverage, capped.leverage);
+});
+
+test('a smaller balance than the cap is used as is', async () => {
+  const result = await calculatePosition({
+    balance: 400, entryPrice: 593.83, slPrice: 582.28, symbol: 'BNBUSDT', symbolInfo: INFO,
+    config: { capitalCapUsdt: 1000 },
+  });
+
+  assert.equal(result.capital, 400);
+});
+
+test('every open position fits its margin slot, so all slots can be used at once', async () => {
+  // Сценарій, заради якого введено слоти: тісний стоп при плечі 1x заблокував
+  // би пів рахунку однією угодою. Тепер маржа ≤ капітал / maxOpenPositions.
+  const cfg = { capitalCapUsdt: 1000, maxOpenPositions: 3 };
+  const tight = await calculatePosition({
+    balance: 1000, entryPrice: 100, slPrice: 99, symbol: 'BNBUSDT', symbolInfo: INFO, config: cfg,
+  });
+
+  // 1% стоп, ризик 7.5 USDT -> позиція 750 USDT; слот 333 -> плече 3x.
+  assert.equal(Math.round(tight.positionUsdt), 750);
+  assert.equal(tight.leverage, 3);
+  assert.ok(tight.marginUsdt * cfg.maxOpenPositions <= cfg.capitalCapUsdt + 1e-6);
+});
+
+test('rejects when liquidation would sit too close to the stop', async () => {
+  // Штучно тісна межа плеча відносно широкого стопа: щоб маржа влізла в слот,
+  // потрібне високе плече, а з ним ліквідація опиняється поруч зі стопом.
+  const result = await calculatePosition({
+    balance: 1000, entryPrice: 100, slPrice: 95, symbol: 'BNBUSDT', symbolInfo: INFO,
+    config: { capitalCapUsdt: 1000, maxOpenPositions: 50, riskPct: 0.02, maxDeltaPct: 0.1 },
+  });
+
+  assert.equal(result.status, VALIDATION.REJECT);
+  assert.match(result.reason, /Ліквідація/);
 });

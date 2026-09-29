@@ -42,10 +42,24 @@ class TelegramClient {
         this.client_options,
       );
 
+      // Під pm2/systemd stdin немає: запит номера телефону повис би назавжди,
+      // і процес виглядав би живим, нічого не збираючи. Без терміналу краще
+      // впасти з чіткою причиною — менеджер процесів це покаже.
+      const interactive = Boolean(process.stdin.isTTY);
+      const ask = (label) => async () => {
+        if (!interactive) {
+          throw new Error(
+            'Telegram session is missing or expired and no terminal is attached. ' +
+            'Run `npm run auth` interactively and put the new TELEGRAM_SESSION_STRING into .env'
+          );
+        }
+        return input.text(label);
+      };
+
       await this.client.start({
-        phoneNumber: async () => await input.text("Phone number: "),
-        password: async () => await input.text("Password (if enabled): "),
-        phoneCode: async () => await input.text("Verification code: "),
+        phoneNumber: ask("Phone number: "),
+        password: ask("Password (if enabled): "),
+        phoneCode: ask("Verification code: "),
         onError: (error) => {
           print(`Authentication error: ${error.message}`, "error");
           console.error(error);
@@ -55,10 +69,11 @@ class TelegramClient {
       this.isConnected = true;
       print("Telegram client connected successfully", "success");
 
-      // Зберігаємо сесію для наступних запусків
+      // Рядок сесії дає повний доступ до акаунта Telegram. Друкуємо його лише
+      // в інтерактивному терміналі — під менеджером процесів він осів би в логах.
       const sessionString = this.client.session.save();
-      if (sessionString !== TELEGRAM_SESSION_STRING) {
-        print("New session string generated. Save it to .env:", "warning");
+      if (sessionString !== TELEGRAM_SESSION_STRING && process.stdin.isTTY) {
+        print("New session string generated. Save it to .env as TELEGRAM_SESSION_STRING:", "warning");
         console.log(sessionString);
       }
 

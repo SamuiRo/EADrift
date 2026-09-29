@@ -12,11 +12,24 @@
 
 import { getAccountBalance, getSymbolInfo, setLeverage, setMarginType } from '../exchanges/binance.js';
 import { logger } from '../shared/logger.js';
+import { CAPITAL_CAP_USDT, MAX_OPEN_POSITIONS } from '../config/app.config.js';
 
 // ─── Конфіг ───────────────────────────────────────────────────────────────────
 
 export const RISK_CONFIG = {
-  riskPct:          0.0075,  // 0.75% балансу на угоду
+  // ── Капітал ───────────────────────────────────────────────────────────────
+  // Усі розрахунки йдуть від min(баланс, capitalCapUsdt): зайві кошти на
+  // рахунку не збільшують ні ризик, ні розмір позиції.
+  capitalCapUsdt:   CAPITAL_CAP_USDT,
+  // Капітал ділиться на стільки маржинальних слотів. Плече підбирається так,
+  // щоб маржа однієї позиції вкладалася в свій слот — інакше дві-три угоди з
+  // тісним стопом при плечі 1x з'їли б увесь рахунок.
+  maxOpenPositions: MAX_OPEN_POSITIONS,
+  // Ліквідація має бути далеко за стопом: відстань до неї ≥ SL × цей множник.
+  liqBufferMultiple:     2,
+  maintenanceMarginPct:  0.005, // консервативна оцінка для USD-M, 0.5%
+
+  riskPct:          0.0075,  // 0.75% капіталу на угоду
   maxLeverage:      10,      // hard cap плеча
   minLeverage:      1,       // мінімум (spot-like)
   maxRiskMultiple:  1.2,     // реальний ризик не може перевищувати target × 1.2
@@ -72,7 +85,11 @@ export async function calculatePosition({ balance, entryPrice, slPrice, symbol, 
   // без мережі й дозволяє перевикористати вже отримані дані символу.
   const info          = symbolInfo ?? await getSymbolInfo(symbol);
   const delta         = Math.abs(entryPrice - slPrice) / entryPrice;
-  const targetRiskUsd = balance * cfg.riskPct;
+
+  // Капітал — менше з двох: фактичний баланс або встановлена межа.
+  const capital       = Math.min(balance, cfg.capitalCapUsdt ?? Infinity);
+  const marginBudget  = capital / Math.max(1, cfg.maxOpenPositions ?? 1);
+  const targetRiskUsd = capital * cfg.riskPct;
 
   // ── Фільтр по ширині SL ───────────────────────────────────────────────────
   if (delta < cfg.minDeltaPct) {
@@ -85,30 +102,47 @@ export async function calculatePosition({ balance, entryPrice, slPrice, symbol, 
   }
 
   // ── Розмір позиції (leverage.txt f3) ──────────────────────────────────────
+  // Розмір визначає ризик і тільки ризик. Плече на нього не впливає — воно
+  // лише вирішує, скільки маржі позиція заблокує.
   let positionUsdt  = targetRiskUsd / delta;
-  let rawLeverage   = positionUsdt / balance;
+
+  // ── Плече від маржинального слота ─────────────────────────────────────────
+  // Плече підбираємо так, щоб маржа позиції вклалась у свою частку капіталу.
+  // Раніше воно рахувалось від усього балансу, і при тісному стопі одна угода
+  // з плечем 1x могла заблокувати половину рахунку.
+  let rawLeverage   = positionUsdt / marginBudget;
 
   // ── Hard cap плеча (f6) ───────────────────────────────────────────────────
-  // Верхня межа справді обмежує розмір: більшу позицію рахунок не потягне.
+  // Тут межа справді обмежує розмір: більшу позицію слот не потягне.
   let leverageCapped = false;
   if (rawLeverage > cfg.maxLeverage) {
     rawLeverage    = cfg.maxLeverage;
-    positionUsdt   = balance * cfg.maxLeverage;
+    positionUsdt   = marginBudget * cfg.maxLeverage;
     leverageCapped = true;
   }
 
   // Нижня межа розміру НЕ обмежує. Розрахункове плече менше 1x означає лише,
-  // що маржинальне плече не потрібне — позиція просто менша за депозит.
-  // Підтягувати positionUsdt до balance тут не можна: це підмінило б розмір,
-  // порахований від ризику, і роздуло б реальний ризик у рази.
+  // що маржинальне плече не потрібне. Підтягувати позицію до слота не можна:
+  // це підмінило б розмір, порахований від ризику.
   let leverage = Math.max(cfg.minLeverage, Math.ceil(rawLeverage)); // Binance вимагає integer
 
   // ── Min order (f8) ────────────────────────────────────────────────────────
   let minOrderAdjusted = false;
   if (positionUsdt < info.minNotional) {
     positionUsdt      = info.minNotional;
-    leverage          = Math.max(1, Math.ceil(positionUsdt / balance));
+    leverage          = Math.max(cfg.minLeverage, Math.ceil(positionUsdt / marginBudget));
     minOrderAdjusted  = true;
+  }
+
+  // ── Запас до ліквідації ───────────────────────────────────────────────────
+  // В ISOLATED ліквідація настає приблизно на 1/плече мінус підтримувальна
+  // маржа. Стоп мусить спрацювати задовго до неї, інакше прослизання або
+  // гепа вистачить, щоб позицію ліквідували повз SL.
+  const liqDistance = 1 / leverage - cfg.maintenanceMarginPct;
+  if (liqDistance < delta * cfg.liqBufferMultiple) {
+    return reject({ delta, targetRiskUsd, info },
+      `Ліквідація надто близько до SL: ${pct(liqDistance)} при плечі ${leverage}x, ` +
+      `потрібно ≥ ${pct(delta * cfg.liqBufferMultiple)}`);
   }
 
   // ── Кількість в базовій монеті ────────────────────────────────────────────
@@ -136,13 +170,19 @@ export async function calculatePosition({ balance, entryPrice, slPrice, symbol, 
     reason = `Реальний ризик ${realRiskUsdt.toFixed(2)} > target ×${cfg.maxRiskMultiple}`;
   }
 
+  const marginUsdt = positionUsdt / leverage;
+
   logger.info('Position calculated', {
     symbol, delta: pct(delta), positionUsdt: positionUsdt.toFixed(2),
-    quantity, leverage, realRiskUsdt: realRiskUsdt.toFixed(2),
-    targetRiskUsd: targetRiskUsd.toFixed(2), status,
+    quantity, leverage, marginUsdt: marginUsdt.toFixed(2),
+    realRiskUsdt: realRiskUsdt.toFixed(2),
+    targetRiskUsd: targetRiskUsd.toFixed(2), capital: capital.toFixed(2), status,
   });
 
-  return { quantity, positionUsdt, leverage, realRiskUsdt, targetRiskUsdt: targetRiskUsd, delta, status, reason };
+  return {
+    quantity, positionUsdt, leverage, marginUsdt, capital,
+    realRiskUsdt, targetRiskUsdt: targetRiskUsd, delta, status, reason,
+  };
 }
 
 // ─── Market entry validation ──────────────────────────────────────────────────

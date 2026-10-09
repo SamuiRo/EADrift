@@ -125,7 +125,10 @@ function simulate({ candles, side, entry, slPrice, tpPrices, shares, beAfterTp1 
     const stopTouched = isLong ? candle.l <= stop : candle.h >= stop;
     if (stopTouched) {
       R += remaining * ((isLong ? stop - entry : entry - stop) / risk);
-      path.push(hit === 0 ? 'SL' : hit === 1 ? 'BE' : `trail@TP${hit - 1}`);
+      const label = hit === 0 ? 'SL'
+        : hit === 1 ? (beAfterTp1 ? 'BE' : 'SL після TP1')
+        : `trail@TP${hit - 1}`;
+      path.push(label);
       remaining = 0; fills++;
       break;
     }

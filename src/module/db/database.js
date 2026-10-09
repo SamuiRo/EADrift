@@ -9,7 +9,7 @@
  *   await db.authenticate(); // перевірити з'єднання
  */
 
-import { Sequelize } from 'sequelize';
+import { Sequelize, QueryTypes } from 'sequelize';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../../shared/logger.js';
@@ -95,9 +95,56 @@ export async function initDatabase({ alter = false } = {}) {
     await db.sync({ alter });
     logger.info('Database synced', { alter });
 
+    await runDataRepairs();
+
   } catch (err) {
     logger.error('Database initialization failed', { err: err.message });
     throw err;
+  }
+}
+
+/**
+ * Виправлення даних, записаних старими версіями коду.
+ *
+ * Кожен крок ідемпотентний: умова WHERE вибирає лише ще не виправлені рядки,
+ * тож повторний запуск нічого не змінює. Виконується після sync, коли всі
+ * таблиці й колонки гарантовано існують.
+ */
+const DATA_REPAIRS = [
+  {
+    // Парсер до v1.2.0 записував першу межу зони як entryHigh, а канал пише
+    // "LOW - HIGH". Межі в таких рядках переставлені місцями.
+    name: 'swap inverted entry zones',
+    sql:  `UPDATE "signals"
+           SET "entryLow" = "entryHigh", "entryHigh" = "entryLow"
+           WHERE "entryLow" IS NOT NULL AND "entryHigh" IS NOT NULL
+             AND "entryLow" > "entryHigh"`,
+  },
+  {
+    // До v1.6.1 таймфрейм у signals не зберігався; у знімку рішення він є.
+    name: 'backfill signal timeframe from evaluations',
+    sql:  `UPDATE "signals"
+           SET "timeframe" = (
+             SELECT e."interval" FROM "signal_evaluations" e
+             WHERE e."signalId" = "signals"."id" AND e."interval" IS NOT NULL
+             ORDER BY e."id" LIMIT 1)
+           WHERE "timeframe" IS NULL
+             AND EXISTS (SELECT 1 FROM "signal_evaluations" e
+                         WHERE e."signalId" = "signals"."id" AND e."interval" IS NOT NULL)`,
+  },
+  {
+    name: 'backfill signal entryMid',
+    sql:  `UPDATE "signals"
+           SET "entryMid" = ("entryLow" + "entryHigh") / 2.0
+           WHERE "entryMid" IS NULL AND "entryLow" IS NOT NULL AND "entryHigh" IS NOT NULL`,
+  },
+];
+
+async function runDataRepairs() {
+  for (const { name, sql } of DATA_REPAIRS) {
+    // З type UPDATE драйвер SQLite повертає [null, кількість змінених рядків].
+    const [, changed] = await db.query(sql, { type: QueryTypes.UPDATE });
+    if (changed > 0) logger.info('Data repair applied', { name, rows: changed });
   }
 }
 

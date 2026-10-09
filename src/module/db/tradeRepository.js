@@ -37,10 +37,16 @@ export async function saveSignal(parsed, priceAtSignal = null) {
       side:          parsed.side === 'BUY' ? 'LONG' : parsed.side === 'SELL' ? 'SHORT' : parsed.side,
       entryLow:      parsed.entryLow   ?? null,
       entryHigh:     parsed.entryHigh  ?? null,
-      entryMid:      parsed.entryMid   ?? null,
+      // saveSignal отримує order, а не розпарсений сигнал: там таймфрейм лежить
+      // в interval, а середини зони немає. Без цих fallback-ів обидва поля
+      // в signals були порожніми, і реплей брав ATR не того таймфрейму.
+      entryMid:      parsed.entryMid
+                       ?? (parsed.entryLow != null && parsed.entryHigh != null
+                         ? (parsed.entryLow + parsed.entryHigh) / 2
+                         : null),
       slPrice:       parsed.slPrice    ?? null,
       tpPrices:      parsed.tpPrices   ?? null,
-      timeframe:     parsed.timeframe  ?? null,
+      timeframe:     parsed.timeframe  ?? parsed.interval ?? null,
       accuracy:      parsed.accuracy   ?? null,
       rawText:       parsed.rawText    ?? null,
       status:        'PENDING',

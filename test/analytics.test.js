@@ -206,3 +206,18 @@ test('exportDatabase writes a complete, readable SQLite copy', async () => {
     fs.rmSync(target, { force: true });
   }
 });
+
+test('saveSignal keeps timeframe and zone mid when given an order', async () => {
+  // Регресія: saveSignal отримує order, де таймфрейм лежить у interval, а
+  // entryMid немає. До v1.6.1 обидва поля в signals лишались порожніми.
+  const { saveSignal } = await import('../src/module/db/tradeRepository.js');
+  const saved = await saveSignal({
+    source: 'channel', symbol: 'LINEAUSDT', side: 'SELL',
+    entryLow: 0.00286, entryHigh: 0.002954, slPrice: 0.00301,
+    tpPrices: [0.002807], interval: '30m',
+  }, 0.002845);
+
+  assert.equal(saved.timeframe, '30m');
+  assert.ok(Math.abs(saved.entryMid - 0.002907) < 1e-12);
+  assert.equal(saved.side, 'SHORT');
+});

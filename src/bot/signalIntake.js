@@ -1,8 +1,10 @@
 import { getBot, isAdmin, sendMarkdown } from './telegram.js';
 import { requestConfirmation } from './confirmation.js';
-import { parseSignal } from '../parser/signalParser.js';
+import { PARSERS, resolveForwardSource } from '../sources/channelRegistry.js';
+import { SIGNAL_CHANNELS } from '../config/app.config.js';
 import { validateSignal } from '../core/signalGeometry.js';
 import { logger } from '../shared/logger.js';
+import { saveSignal, updateSignalStatus } from '../module/db/tradeRepository.js';
 
 export function signalToOrder(signal, source = 'unknown') {
   return {
@@ -42,8 +44,15 @@ export async function handleParsedSignal(signal, { source = 'unknown' } = {}) {
       side:   signal.side,
       errors: check.errors,
     });
+
+    // Записуємо і такі сигнали: биті публікації — частина якості каналу.
+    // Без запису канал, що шле неповні сигнали, виглядав би в статистиці
+    // чистішим, ніж є. Поля можуть бути зіпсовані, тож помилку запису ковтаємо.
+    const record = await saveSignal(signalToOrder(signal, source), null).catch(() => null);
+    await updateSignalStatus(record?.id, 'REJECTED', `Geometry: ${check.reason}`.slice(0, 500));
+
     await sendMarkdown(
-      `🚫 *Сигнал не пройшов перевірку структури* — ${signal.symbol}\n\n` +
+      `🚫 *Сигнал не пройшов перевірку структури* — ${signal.symbol}  \`[${source}]\`\n\n` +
       check.errors.map(e => `• ${e}`).join('\n') +
       `\n\n_Ордер не виставлено_`
     );
@@ -59,6 +68,19 @@ export async function handleParsedSignal(signal, { source = 'unknown' } = {}) {
   return requestConfirmation(signalToOrder(signal, source));
 }
 
+/**
+ * Розпарсити текст: спершу парсером відомого каналу, потім рештою.
+ * Для повідомлень невідомого походження формат заздалегідь невідомий.
+ */
+export function parseWithFallback(text, preferred = null) {
+  const order = [preferred, ...Object.keys(PARSERS).filter(name => name !== preferred)].filter(Boolean);
+  for (const name of order) {
+    const signal = PARSERS[name](text);
+    if (signal) return { ...signal, parser: name };
+  }
+  return null;
+}
+
 export function registerAdminSignalIntake() {
   const bot = getBot();
 
@@ -68,7 +90,12 @@ export function registerAdminSignalIntake() {
     const text = msg.text ?? msg.caption;
     if (!text || text.trim().startsWith('/')) return;
 
-    const signal = parseSignal(text);
+    // Переслане з відомого каналу зараховується цьому каналу і парситься його
+    // парсером — тоді ручне пересилання й автоматичний прийом дають одну
+    // й ту саму статистику джерела.
+    const { source, channel } = resolveForwardSource(msg, SIGNAL_CHANNELS);
+    const signal = parseWithFallback(text, channel?.parser);
+
     if (!signal) {
       if (/#\w+USDT|Entry Zone:|Stop-Loss:/i.test(text)) {
         await sendMarkdown(
@@ -80,9 +107,7 @@ export function registerAdminSignalIntake() {
     }
 
     try {
-      await handleParsedSignal(signal, {
-        source: msg.forward_origin || msg.forward_date ? 'admin_forward' : 'admin_message',
-      });
+      await handleParsedSignal(signal, { source });
     } catch (err) {
       logger.error('Admin signal intake failed', { err: err.message });
       await sendMarkdown(`*Signal processing failed*\n\`${err.message}\``);

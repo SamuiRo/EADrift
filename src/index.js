@@ -13,8 +13,9 @@ import {
   MONITOR_INTERVAL_MS,
   STARTUP_TRADING_MODE,
   TELEGRAM_SESSION_STRING,
-  TELEGRAM_SIGNAL_CHANNEL_ID,
+  SIGNAL_CHANNELS,
 } from './config/app.config.js';
+import { PARSERS } from './sources/channelRegistry.js';
 import { setMode, getMode, MODE_LABELS } from './core/tradingMode.js';
 import { WELCOME_MESSAGE, SUB_TITLE } from './shared/message.js';
 import { banner } from './shared/utils.js';
@@ -58,37 +59,46 @@ class Drift {
       //    (watchlist in-memory скинувся — читаємо з trades де status=OPEN)
       await restoreWatchlistFromDB();
 
-      // 4. Channel listener → signal parser → confirmation
-      //    Запускається тільки якщо є session string і channel id
-      if (TELEGRAM_SESSION_STRING && TELEGRAM_SIGNAL_CHANNEL_ID) {
+      // 4. Channel listeners → parser каналу → confirmation
+      //    Кожен канал — окремий слухач зі своїм ім'ям джерела і парсером.
+      //    Дедуплікація повідомлень теж окрема: ID повідомлень унікальні лише
+      //    в межах каналу, і спільний набір ID змішав би різні канали.
+      const listeners = [];
+      const failedChannels = [];
 
-        const listener = new TelegramSourceListener(
-          TELEGRAM_SIGNAL_CHANNEL_ID,
-          async (signal) => {
-            await handleParsedSignal(signal, { source: 'channel' });
-          },
-        );
+      if (TELEGRAM_SESSION_STRING && SIGNAL_CHANNELS.length) {
+        for (const channel of SIGNAL_CHANNELS) {
+          const listener = new TelegramSourceListener(
+            channel.id,
+            async (signal) => {
+              await handleParsedSignal(signal, { source: channel.name });
+            },
+            { name: channel.name, parse: PARSERS[channel.parser] },
+          );
 
-        await listener.connect();
-        await listener.startListening();
-
-        logger.info('Channel listener started');
-
-        const shutdown = async () => {
-          logger.info('Shutting down...');
-          await listener.stop();
-          process.exit(0);
-        };
-
-        process.on('SIGINT',  shutdown);
-        process.on('SIGTERM', shutdown);
-
+          // Один недоступний канал (не підписаний акаунт, помилка в ID) не має
+          // зупиняти решту — збираємо, що вдалося, і повідомляємо адміна.
+          try {
+            await listener.connect();
+            await listener.startListening();
+            listeners.push(listener);
+            logger.info('Channel listener started', { source: channel.name, channel: channel.id, parser: channel.parser });
+          } catch (err) {
+            failedChannels.push(`${channel.name} (${err.message})`);
+            logger.error('Channel listener failed to start', { source: channel.name, channel: channel.id, err: err.message });
+          }
+        }
       } else {
-        logger.warn('Channel listener skipped — run `npm run auth` to create TELEGRAM_SESSION_STRING');
-
-        process.on('SIGINT',  () => { logger.info('Shutting down...'); process.exit(0); });
-        process.on('SIGTERM', () => { logger.info('Shutting down...'); process.exit(0); });
+        logger.warn('Channel listener skipped — set SIGNAL_CHANNELS and run `npm run auth` to create TELEGRAM_SESSION_STRING');
       }
+
+      const shutdown = async () => {
+        logger.info('Shutting down...');
+        for (const listener of listeners) await listener.stop().catch(() => {});
+        process.exit(0);
+      };
+      process.on('SIGINT',  shutdown);
+      process.on('SIGTERM', shutdown);
 
       // 5. Notify admin
       await sendMarkdown(
@@ -97,7 +107,9 @@ class Drift {
         `Режим: *${MODE_LABELS[getMode()]}*\n` +
         `Капітал: \`до ${CAPITAL_CAP_USDT} USDT\`, позицій: \`до ${MAX_OPEN_POSITIONS}\`\n` +
         `Monitor: every \`${MONITOR_INTERVAL_MS / 1000}s\`\n` +
-        `Channel: \`${TELEGRAM_SESSION_STRING ? 'active' : 'inactive'}\`\n\n` +
+        `Канали: ${listeners.length ? listeners.map(l => `\`${l.name}\``).join(', ') : '`немає`'}\n` +
+        (failedChannels.length ? `⚠️ Не підключено: \`${failedChannels.join('; ').replace(/`/g, "'")}\`\n` : '') +
+        `\n` +
         `Введи /start для списку команд`
       );
 

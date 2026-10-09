@@ -52,6 +52,7 @@ npm run dev
 | `MONITOR_INTERVAL_MS` | `5000` | інтервал position monitor |
 | `CONFIRM_MAX_PRICE_MOVE_PCT` | `0.005` | максимальна зміна ціни між оцінкою та підтвердженням; `0.005` = 0.5% |
 | `LOG_LEVEL` | `info` | рівень Winston; `debug` також вмикає SQL logs |
+| `SIGNAL_CHANNELS` | — | канали-джерела `ім'я:id[:парсер],...`, див. [CHANNELS.md](./CHANNELS.md) |
 | `STARTUP_TRADING_MODE` | `CONFIRM_ONLY` | режим після кожного старту процесу; на сервері для збору даних — `SHADOW` |
 | `CAPITAL_CAP_USDT` | `1000` | максимум капіталу, від якого рахуються ризик, розмір і маржа |
 | `MAX_OPEN_POSITIONS` | `3` | скільки позицій одночасно; визначає розмір маржинального слота |

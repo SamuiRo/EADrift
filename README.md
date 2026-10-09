@@ -58,6 +58,7 @@ Stop-loss розраховується самостійно від фактич�
 - [Відомі обмеження](./docs/KNOWN_LIMITATIONS.md)
 - [Розгортання на сервері](./docs/DEPLOYMENT.md)
 - [Збір і аналіз даних](./docs/DATA_COLLECTION.md)
+- [Канали-джерела](./docs/CHANNELS.md)
 - [Історія покращень](./docs/HISTORY.md)
 - [Changelog](./CHANGELOG.md)
 

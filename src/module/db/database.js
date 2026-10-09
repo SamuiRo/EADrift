@@ -110,6 +110,14 @@ export async function initDatabase({ alter = false } = {}) {
  * тож повторний запуск нічого не змінює. Виконується після sync, коли всі
  * таблиці й колонки гарантовано існують.
  */
+// Те саме значення, що й LEGACY_CHANNEL_SOURCE у конфігу. Читається напряму з
+// env, щоб database.js не тягнув за собою перевірку всього конфігу.
+const LEGACY_SOURCE_NAME = process.env.TELEGRAM_SIGNAL_CHANNEL_NAME || 'ggshot';
+
+// Поле source з'явилось у v1.2.0. Усе "unknown" до цієї дати — сигнали єдиного
+// тоді каналу, переслані адміністратором.
+const SOURCE_FIELD_INTRODUCED = '2026-09-02';
+
 const DATA_REPAIRS = [
   {
     // Парсер до v1.2.0 записував першу межу зони як entryHigh, а канал пише
@@ -132,6 +140,22 @@ const DATA_REPAIRS = [
              AND EXISTS (SELECT 1 FROM "signal_evaluations" e
                          WHERE e."signalId" = "signals"."id" AND e."interval" IS NOT NULL)`,
   },
+  // До v1.7.0 бот слухав рівно один канал, і його сигнали підписувались
+  // словом "channel" (до v1.2.0 поля не було, і записи отримали "unknown").
+  // Тепер джерело — ім'я каналу. Щоб історія цього каналу не відірвалась від
+  // нових записів, старі мітки переносяться на його ім'я. Безпечно лише тому,
+  // що каналів тоді був один.
+  //
+  // "channel" новий код не пише ніколи, тож його переносимо завжди.
+  // "unknown" може з'явитися й зараз для справді невідомого джерела, тому
+  // переносимо лише записи, старші за появу поля source.
+  ...[['signals', 'receivedAt'], ['signal_evaluations', 'evaluatedAt']].map(([table, timeColumn]) => ({
+    name: `rename legacy single-channel source in ${table}`,
+    sql:  `UPDATE "${table}"
+           SET "source" = '${LEGACY_SOURCE_NAME.replace(/'/g, "''")}'
+           WHERE "source" = 'channel'
+              OR ("source" = 'unknown' AND "${timeColumn}" < '${SOURCE_FIELD_INTRODUCED}')`,
+  })),
   {
     name: 'backfill signal entryMid',
     sql:  `UPDATE "signals"

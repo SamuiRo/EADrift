@@ -268,9 +268,22 @@ function report(results, skipped, args) {
                 + `${(RISK_CONFIG.maxDeltaPct * 100).toFixed(1)}%) — це теоретична база, не досяжний результат`);
     }
 
+    // Розріз по каналах — саме це і є "якість джерела". Змішане середнє по
+    // кількох провайдерах не описує жодного з них.
+    const bySource = groupBy(rows, r => r.signal.source ?? 'unknown');
+    if (bySource.size > 1) {
+      for (const [source, group] of bySource) {
+        const g = group.filter(r => !r.skipped);
+        const sum = g.reduce((acc, r) => acc + r.R, 0);
+        console.log(`  ${source.padEnd(22)} взято ${String(g.length).padStart(3)} із ${String(group.length).padEnd(3)}`
+                  + `  сер. ${g.length ? (sum / g.length).toFixed(3).padStart(6) : '     —'}R`
+                  + `  плюсових ${g.length ? Math.round(g.filter(r => r.R > 0).length / g.length * 100) + '%' : '—'}`);
+      }
+    }
+
     if (args.detail) {
       for (const row of rows) {
-        const sym = row.signal.symbol.replace('USDT', '').padEnd(8);
+        const sym = `${row.signal.symbol.replace('USDT', '').padEnd(8)} ${String(row.signal.source ?? '').padEnd(12)}`;
         if (row.skipped) { console.log(`  ${sym} пропуск: ${row.reason}`); continue; }
         const slPct = Math.abs(row.entry - row.slPrice) / row.entry * 100;
         // Позначаємо рядки, які наживо не пройшли б фільтр ширини SL у risk engine:
@@ -301,3 +314,13 @@ function report(results, skipped, args) {
 main()
   .catch(err => { console.error('Replay failed:', err.message); process.exitCode = 1; })
   .finally(() => db.close());
+
+function groupBy(items, keyOf) {
+  const map = new Map();
+  for (const item of items) {
+    const key = keyOf(item);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(item);
+  }
+  return map;
+}

@@ -108,6 +108,14 @@ function evaluationRow(order, ctx, decision, reason = null) {
   };
 }
 
+/**
+ * Мітка джерела для повідомлень. У моноширинному блоці, бо імена каналів
+ * можуть містити "_", який Markdown сприйняв би як курсив.
+ */
+function sourceTag(order) {
+  return `\`[${String(order.source ?? 'unknown').replace(/`/g, "'")}]\``;
+}
+
 /** Відхилити сигнал: статус у БД, знімок рішення, повідомлення адміну. */
 async function rejectSignal(order, ctx, reason) {
   logger.warn('Signal rejected', { symbol: order.symbol, reason });
@@ -115,7 +123,7 @@ async function rejectSignal(order, ctx, reason) {
   await updateSignalStatus(order._signalDbId, 'REJECTED', reason);
   await recordEvaluation(evaluationRow(order, ctx, DECISIONS.REJECTED, reason));
   await sendMarkdown(
-    `🚫 *Сигнал відхилено* — ${order.symbol}\n\n` +
+    `🚫 *Сигнал відхилено* — ${order.symbol}  ${sourceTag(order)}\n\n` +
     `*Причина:* ${reason}\n\n` +
     `_Ордер не виставлено_`
   );
@@ -332,7 +340,7 @@ export async function requestConfirmation(order) {
     });
 
     await sendMarkdown(
-      `👁 *${order.symbol}* — записано в shadow\n` +
+      `👁 *${order.symbol}* — записано в shadow  ${sourceTag(order)}\n` +
       `Вхід: \`${fmt(enrichedOrder.entryPrice)}\`  SL: \`${fmt(plan.slPrice)}\` _(${plan.slSource})_\n` +
       `Зважений R:R: \`${plan.weightedRR.toFixed(2)}\`  Плече: \`${riskResult.leverage}x\`\n` +
       `_Ордер не виставлено_`
@@ -430,7 +438,7 @@ function buildConfirmCard(order, risk, marketEntry, currentPrice, balance, plan)
   const lines = [];
 
   // ── Заголовок ──────────────────────────────────────────────────────────────
-  lines.push(`📋 *НОВИЙ ОРДЕР — ${symbol}*`);
+  lines.push(`📋 *НОВИЙ ОРДЕР — ${symbol}*  ${sourceTag(order)}`);
 
   // Попередження про market вхід поза зоною
   if (marketEntry?.slipped) {

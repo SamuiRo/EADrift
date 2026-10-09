@@ -23,6 +23,8 @@ export class TelegramSourceListener {
    * @param {number}        [options.seenIdsMaxSize=1000]    — при якому розмірі чистити seenMessageIds
    * @param {number}        [options.seenIdsTrimTo=500]      — скільки залишати після чистки
    * @param {number}        [options.staleMessageMs=300000]  — повідомлення старіші за це ігноруються при пінгу
+   * @param {string}        [options.name]                   — ім'я джерела, для логів
+   * @param {Function}      [options.parse]                  — парсер формату цього каналу
    */
   constructor(channelId, onSignal, options = {}) {
     if (!channelId) throw new Error('TelegramSourceListener: channelId is required');
@@ -30,6 +32,9 @@ export class TelegramSourceListener {
 
     this.channelId = String(channelId);
     this.onSignal = onSignal;
+    this.name = options.name ?? this.channelId;
+    // Кожен канал пише у своєму форматі, тому парсер — властивість слухача.
+    this.parse = options.parse ?? parseSignal;
     this.client = null;
     this.isListening = false;
 
@@ -81,7 +86,7 @@ export class TelegramSourceListener {
       );
 
       this.isListening = true;
-      print(`TelegramSourceListener: listening to channel ${this.channelId}`, 'success');
+      print(`TelegramSourceListener[${this.name}]: listening to channel ${this.channelId}`, 'success');
 
       // Keepalive ping
       this._startPing();
@@ -130,10 +135,10 @@ export class TelegramSourceListener {
   // ─── Спільна логіка парсингу ───────────────────────────────────────────────
 
   async _tryParseAndHandle(text, msgId) {
-    const signal = parseSignal(text);
+    const signal = this.parse(text);
     if (!signal) return;
 
-    print(`TelegramSourceListener: signal received [${signal.type}] ${signal.symbol} (msgId=${msgId})`, 'info');
+    print(`TelegramSourceListener[${this.name}]: signal received [${signal.type}] ${signal.symbol} (msgId=${msgId})`, 'info');
     await this.onSignal(signal);
   }
 

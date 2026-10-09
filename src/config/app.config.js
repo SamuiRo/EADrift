@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { logger } from '../shared/logger.js';
+import { parseChannelConfig } from '../sources/channelRegistry.js';
 
 import pkg from '../../package.json' with { type: 'json' };
 
@@ -79,7 +80,6 @@ const recommendedForChannel = [
   'TELEGRAM_API_ID',
   'TELEGRAM_API_HASH',
   'TELEGRAM_SESSION_STRING',
-  'TELEGRAM_SIGNAL_CHANNEL_ID',
 ];
 
 for (const key of required) {
@@ -94,3 +94,28 @@ for (const key of recommendedForChannel) {
     logger.warn(`Channel listener disabled: missing ${key}`);
   }
 }
+
+// ─── Канали-джерела сигналів ──────────────────────────────────────────────────
+
+/**
+ * Канали, які слухає бот, кожен зі своїм ім'ям джерела.
+ * SIGNAL_CHANNELS=ім'я:id[:парсер],... — див. sources/channelRegistry.js.
+ * Старий TELEGRAM_SIGNAL_CHANNEL_ID лишається робочим як один канал.
+ */
+const channelConfig = parseChannelConfig({
+  signalChannels:  process.env.SIGNAL_CHANNELS,
+  legacyChannelId: process.env.TELEGRAM_SIGNAL_CHANNEL_ID,
+  legacyName:      process.env.TELEGRAM_SIGNAL_CHANNEL_NAME || 'ggshot',
+});
+
+for (const error of channelConfig.errors) {
+  logger.error(`SIGNAL_CHANNELS: ${error}`);
+}
+if (!channelConfig.channels.length) {
+  logger.warn('Channel listener disabled: no channels in SIGNAL_CHANNELS / TELEGRAM_SIGNAL_CHANNEL_ID');
+}
+
+export const SIGNAL_CHANNELS = channelConfig.channels;
+
+/** Ім'я, під яким записувались сигнали єдиного каналу до появи реєстру. */
+export const LEGACY_CHANNEL_SOURCE = process.env.TELEGRAM_SIGNAL_CHANNEL_NAME || 'ggshot';

@@ -221,3 +221,20 @@ test('saveSignal keeps timeframe and zone mid when given an order', async () => 
   assert.ok(Math.abs(saved.entryMid - 0.002907) < 1e-12);
   assert.equal(saved.side, 'SHORT');
 });
+
+test('findRecentDuplicateSignal matches reposts within a channel only', async () => {
+  const { saveSignal, findRecentDuplicateSignal } = await import('../src/module/db/tradeRepository.js');
+  const base = {
+    symbol: 'CTSIUSDT', side: 'BUY', entryLow: 0.0325, entryHigh: 0.034,
+    slPrice: 0.03, tpPrices: [0.0415], interval: '1h',
+  };
+  await saveSignal({ ...base, source: 'kira_ict' }, 0.033);
+
+  assert.ok(await findRecentDuplicateSignal({ ...base, side: 'LONG' }, 'kira_ict'), 'same channel repost');
+  assert.equal(await findRecentDuplicateSignal({ ...base, side: 'LONG' }, 'ggshot'), null, 'other channel is not a duplicate');
+  assert.equal(await findRecentDuplicateSignal({ ...base, side: 'LONG', slPrice: 0.029 }, 'kira_ict'), null, 'different stop');
+
+  // Канал із власним ID сигналу порівнюється за ним.
+  await saveSignal({ ...base, symbol: 'ENAUSDT', source: 'ggshot', signalId: '1152007667' }, 0.095);
+  assert.ok(await findRecentDuplicateSignal({ signalId: '1152007667', symbol: 'X' }, 'ggshot'));
+});

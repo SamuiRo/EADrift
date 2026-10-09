@@ -12,13 +12,15 @@
  */
 
 import { parseSignal as parseGgshot } from '../parser/signalParser.js';
+import { parseKiraSignal } from '../parser/kiraIctParser.js';
 
 /**
  * Парсери за назвою. Канал у конфігу посилається на парсер за ключем.
  * Новий формат сигналів = новий запис тут.
  */
 export const PARSERS = {
-  ggshot: parseGgshot,
+  ggshot:   parseGgshot,
+  kira_ict: parseKiraSignal,
 };
 
 export const DEFAULT_PARSER = 'ggshot';

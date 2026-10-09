@@ -142,3 +142,19 @@ test('validateSignal runs source verification only when asked', () => {
   assert.equal(validateSignal(tampered).valid, true);
   assert.equal(validateSignal(tampered, { verifySource: true }).valid, false);
 });
+
+import { checkPriceScale } from '../src/core/signalGeometry.js';
+
+test('price scale check catches a thousands/decimal mix-up', () => {
+  // "81,500" прочитане як 81.5 при ринку ~82 000 — геометрія бездоганна,
+  // але масштаб у тисячу разів не той.
+  const order = { entryLow: 81.5, entryHigh: 82.3 };
+  assert.match(checkPriceScale(order, 82000), /не відповідають ринку/);
+  assert.equal(checkPriceScale({ entryLow: 81500, entryHigh: 82300 }, 82000), null);
+});
+
+test('price scale check tolerates normal distance and missing data', () => {
+  assert.equal(checkPriceScale({ entryLow: 100, entryHigh: 104 }, 110), null);
+  assert.equal(checkPriceScale({ entryLow: 100, entryHigh: 104 }, null), null);
+  assert.equal(checkPriceScale({}, 100), null);
+});

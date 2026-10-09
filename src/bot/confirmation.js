@@ -40,6 +40,7 @@ import {
   VALIDATION,
   RISK_CONFIG,
 } from '../core/riskEngine.js';
+import { checkPriceScale } from '../core/signalGeometry.js';
 import { normalizedTpShares } from '../core/exitStrategy.js';
 import {
   getMode, isPaused, isShadow, isFullAuto, isSemiAuto,
@@ -228,6 +229,14 @@ export async function requestConfirmation(order) {
 
   if (!order.tpPrices?.length) {
     return rejectSignal(order, ctx, 'Signal has no take-profit levels');
+  }
+
+  // Ціни сигналу мусять бути в тому ж масштабі, що й ринок. Інакше це помилка
+  // парсингу (кома як розділювач тисяч чи десятковий знак), не той символ або
+  // сигнал для іншого інструмента. Зона за 50% від ринку угодою бути не може.
+  const scaleProblem = checkPriceScale(order, currentPrice);
+  if (scaleProblem) {
+    return rejectSignal(order, ctx, scaleProblem);
   }
 
   // ── Визначаємо ефективну ціну входу ──────────────────────────────────────

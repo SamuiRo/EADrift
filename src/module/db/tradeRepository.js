@@ -83,6 +83,43 @@ export async function updateSignalStatus(signalDbId, status, rejectReason = null
 }
 
 /**
+ * Знайти той самий сигнал того ж джерела, отриманий нещодавно.
+ *
+ * Канали перепощують сигнали (з результатом, як нагадування). Без цього
+ * повтор потрапляв би в статистику каналу як новий сигнал і спотворював
+ * її. Якщо канал дає власний ID сигналу — порівнюємо за ним, інакше за
+ * символом, напрямом, зоною і стопом.
+ *
+ * @returns {Promise<Signal|null>}
+ */
+export async function findRecentDuplicateSignal(parsed, source, { withinDays = 7 } = {}) {
+  const since = new Date(Date.now() - withinDays * 86400000);
+  const side  = parsed.side === 'BUY' ? 'LONG' : parsed.side === 'SELL' ? 'SHORT' : parsed.side;
+
+  const where = parsed.signalId
+    ? { source, signalId: String(parsed.signalId) }
+    : {
+        source,
+        symbol:    parsed.symbol,
+        side,
+        slPrice:   parsed.slPrice,
+        entryLow:  parsed.entryLow,
+        entryHigh: parsed.entryHigh,
+      };
+
+  try {
+    return await Signal.findOne({
+      where: { ...where, receivedAt: { [Op.gte]: since } },
+      order: [['receivedAt', 'DESC']],
+    });
+  } catch (err) {
+    // Пошук дубля не має права зупинити прийом сигналу.
+    logger.error('findRecentDuplicateSignal failed', { err: err.message, source });
+    return null;
+  }
+}
+
+/**
  * Записати знімок рішення по сигналу — включно з відхиленими.
  *
  * Свідомо ніколи не кидає: збір статистики не має права зупинити торгівлю

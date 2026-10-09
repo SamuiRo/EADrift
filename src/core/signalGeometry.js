@@ -219,4 +219,30 @@ export function validateSignal(signal, { verifySource = false } = {}) {
   };
 }
 
+// ─── Шар 3: масштаб відносно ринку ────────────────────────────────────────────
+
+/**
+ * Чи узгоджуються ціни сигналу з ринком за масштабом.
+ *
+ * Помилка масштабу (кома як розділювач тисяч чи десятковий знак, не той
+ * символ) лишає геометрію бездоганною, тож перші два шари її не бачать.
+ * Зона далі ніж maxDeviation від ринку угодою бути не може.
+ *
+ * @returns {string|null} причина відмови або null
+ */
+export function checkPriceScale(order, currentPrice, maxDeviation = 0.5) {
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return null;
+
+  const low  = order.entryLow  ?? order.entryPrice;
+  const high = order.entryHigh ?? order.entryPrice;
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+
+  const mid = (low + high) / 2;
+  const deviation = Math.abs(mid - currentPrice) / currentPrice;
+  if (deviation <= maxDeviation) return null;
+
+  return `Ціни сигналу не відповідають ринку: зона ~${mid}, ринок ${currentPrice} ` +
+         `(розбіжність ${(deviation * 100).toFixed(0)}%). Імовірно помилка масштабу чисел або символу`;
+}
+
 function pct(n) { return `${(n * 100).toFixed(2)}%`; }

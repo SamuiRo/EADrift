@@ -4,7 +4,7 @@ import { PARSERS, resolveForwardSource } from '../sources/channelRegistry.js';
 import { SIGNAL_CHANNELS } from '../config/app.config.js';
 import { validateSignal } from '../core/signalGeometry.js';
 import { logger } from '../shared/logger.js';
-import { saveSignal, updateSignalStatus } from '../module/db/tradeRepository.js';
+import { saveSignal, updateSignalStatus, findRecentDuplicateSignal } from '../module/db/tradeRepository.js';
 
 export function signalToOrder(signal, source = 'unknown') {
   return {
@@ -31,6 +31,19 @@ export async function handleParsedSignal(signal, { source = 'unknown' } = {}) {
       symbol: signal.symbol,
       signalId: signal.signalId,
     });
+    return null;
+  }
+
+  // Повтор того самого сигналу з того ж каналу не рахуємо вдруге.
+  const duplicate = await findRecentDuplicateSignal(signal, source);
+  if (duplicate) {
+    logger.info('Duplicate signal ignored', {
+      source, symbol: signal.symbol, firstSeenId: duplicate.id, firstSeenAt: duplicate.receivedAt,
+    });
+    await sendMarkdown(
+      `↩️ *${signal.symbol}* \`[${source}]\` — повтор сигналу від ` +
+      `${new Date(duplicate.receivedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC, не враховано`
+    );
     return null;
   }
 

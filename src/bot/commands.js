@@ -20,7 +20,8 @@
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
-import { getBot, adminOnly, sendMarkdown, sendAdminDocument, formatPosition } from './telegram.js';
+import { getBot, adminOnly, sendMarkdown, sendAdminDocument, formatPosition, getPollingHealth } from './telegram.js';
+import { APP_VERSION } from '../config/app.config.js';
 import { exportDatabase } from '../module/db/database.js';
 import {
   getOpenPositions,
@@ -118,12 +119,19 @@ async function handleStatus(msg) {
   const watchlist = getWatchlist();
   const watching  = Object.keys(watchlist).length;
 
+  const polling = getPollingHealth();
+  const pollingLine = polling.silentMs === null
+    ? '`ще не опитувався`'
+    : `\`відповідь ${Math.round(polling.silentMs / 1000)} с тому\`` +
+      (polling.lastError ? `, остання помилка ${Math.round((Date.now() - polling.lastError.at) / 60000)} хв тому` : '');
+
   const text = [
-    `*Статус бота*`,
+    `*Статус бота*  v${APP_VERSION}`,
     ``,
     `Режим       : *${MODE_LABELS[mode]}*`,
     `Баланс USDT : ${balanceLine}`,
     `Позицій     : \`${watching}\` в моніторі`,
+    `Telegram    : ${pollingLine}`,
     ``,
     `*Параметри ризику:*`,
     `Капітал     : \`до ${RISK_CONFIG.capitalCapUsdt} USDT\` (решта балансу не використовується)`,

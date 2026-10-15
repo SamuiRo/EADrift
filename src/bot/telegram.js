@@ -15,21 +15,93 @@ export function getBot() {
  * Ініціалізувати бота. Викликати один раз при старті.
  * @returns {TelegramBot}
  */
+// Long polling: Telegram тримає запит відкритим до LONG_POLL_SECONDS, тож
+// таймаут HTTP-запиту мусить бути помітно більшим.
+const LONG_POLL_SECONDS  = 10;
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// Скільки тиші від Telegram вважати зависанням, і як часто перевіряти.
+export const POLLING_STALL_MS  = 5 * 60_000;
+const WATCHDOG_INTERVAL_MS     = 60_000;
+
+let watchdogHandle = null;
+let lastPollingError = null;
+
 export function initBot() {
   if (bot) return bot;
 
-  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
+    polling: { autoStart: true, interval: 300, params: { timeout: LONG_POLL_SECONDS } },
+    // Без таймауту запит getUpdates на "завислому" TCP-з'єднанні не завершується
+    // ніколи. Бібліотека планує наступне опитування лише після завершення
+    // попереднього, тому прийом команд тихо зупинявся назавжди, а isPolling()
+    // і далі повертав true. Таймаут перетворює зависання на звичайну помилку,
+    // після якої цикл опитування продовжується сам.
+    request: { timeout: REQUEST_TIMEOUT_MS },
+  });
 
   bot.on('polling_error', (err) => {
-    logger.error('Telegram polling error', { err: err.message });
+    lastPollingError = { at: Date.now(), message: err.message, code: err.code };
+    logger.error('Telegram polling error', { err: err.message, code: err.code });
   });
 
   bot.on('error', (err) => {
     logger.error('Telegram error', { err: err.message });
   });
 
+  startPollingWatchdog();
+
   logger.info('Telegram bot initialized');
   return bot;
+}
+
+/**
+ * Стан прийому команд: коли востаннє Telegram відповів на опитування.
+ * Бібліотека оновлює _lastUpdate після кожного успішного getUpdates,
+ * навіть порожнього, тож це надійний сигнал "цикл живий".
+ */
+export function getPollingHealth(now = Date.now()) {
+  const last = bot?._polling?._lastUpdate || 0;
+  return {
+    lastResponseAt: last || null,
+    silentMs:       last ? now - last : null,
+    lastError:      lastPollingError,
+    stalled:        Boolean(last) && now - last > POLLING_STALL_MS,
+  };
+}
+
+/**
+ * Страховка поверх таймауту: якщо Telegram мовчить довше за POLLING_STALL_MS,
+ * процес завершується з кодом 1, і pm2 піднімає його заново.
+ *
+ * Перезапуск процесу, а не лише опитування, — свідомо: скасування завислого
+ * запиту в цій бібліотеці може запустити два цикли опитування одночасно, а
+ * Telegram на паралельні getUpdates відповідає 409 і ламає прийом ще гірше.
+ * Стан відновлюється при старті: watchlist — з БД, режим — з env.
+ */
+function startPollingWatchdog() {
+  if (watchdogHandle) return;
+
+  watchdogHandle = setInterval(() => {
+    const health = getPollingHealth();
+    if (!health.stalled) return;
+
+    logger.error('Telegram polling stalled — restarting process', {
+      silentSec: Math.round(health.silentMs / 1000),
+      lastError: health.lastError?.message ?? null,
+    });
+
+    // Спроба попередити адміна. sendMessage — окремий запит, він може пройти
+    // навіть коли завис саме getUpdates. Чекаємо недовго і виходимо в будь-якому разі.
+    const notice = bot.sendMessage(
+      TELEGRAM_ADMIN_CHAT_ID,
+      `⚠️ Прийом команд завис (${Math.round(health.silentMs / 60000)} хв без відповіді від Telegram). Перезапускаю бота.`,
+    ).catch(() => {});
+    const deadline = new Promise(resolve => setTimeout(resolve, 5000));
+    Promise.race([notice, deadline]).finally(() => process.exit(1));
+  }, WATCHDOG_INTERVAL_MS);
+
+  watchdogHandle.unref?.();
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────

@@ -1,5 +1,9 @@
 import crypto from 'crypto';
 import axios from 'axios';
+
+// Без таймауту запит на "завислому" з'єднанні не завершується ніколи, і все,
+// що на нього чекає (тік монітора, рішення по сигналу), зупиняється мовчки.
+const http = axios.create({ timeout: 15_000 });
 import { logger } from '../shared/logger.js';
 import {
   BINANCE_TESTNET,
@@ -56,7 +60,7 @@ async function get(path, params = {}) {
   const qs = buildSignedParams(params);
   const url = `${BASE_URL}${path}?${qs}`;
   try {
-    const { data } = await axios.get(url, { headers: authHeaders() });
+    const { data } = await http.get(url, { headers: authHeaders() });
     return data;
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;
@@ -68,7 +72,7 @@ async function get(path, params = {}) {
 async function publicGet(path, params = {}) {
   const url = `${BASE_URL}${path}`;
   try {
-    const { data } = await axios.get(url, { params });
+    const { data } = await http.get(url, { params });
     return data;
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;
@@ -80,7 +84,7 @@ async function publicGet(path, params = {}) {
 async function post(path, params = {}) {
   const body = buildSignedParams(params);
   try {
-    const { data } = await axios.post(`${BASE_URL}${path}`, body, {
+    const { data } = await http.post(`${BASE_URL}${path}`, body, {
       headers: authHeaders(),
     });
     return data;
@@ -95,7 +99,7 @@ async function del(path, params = {}) {
   const qs = buildSignedParams(params);
   const url = `${BASE_URL}${path}?${qs}`;
   try {
-    const { data } = await axios.delete(url, { headers: authHeaders() });
+    const { data } = await http.delete(url, { headers: authHeaders() });
     return data;
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;

@@ -231,6 +231,19 @@ export async function requestConfirmation(order) {
     return rejectSignal(order, ctx, 'Signal has no take-profit levels');
   }
 
+  // Без ринкової ціни нічого не можна перевірити: ні вхід, ні SL/TP, ні масштаб.
+  // Раніше сигнал ішов далі й падав на розрахунку ризику з невиразним
+  // "Risk calculation failed". Найчастіша причина — символу немає на Binance
+  // Futures: провайдер торгує на іншій біржі. Це варто бачити в статистиці
+  // каналу окремою причиною.
+  if (!Number.isFinite(currentPrice)) {
+    const err = priceResult.reason?.message ?? '';
+    const reason = /invalid symbol/i.test(err)
+      ? `Символу ${order.symbol} немає на Binance USD-M Futures`
+      : `Не вдалося отримати ринкову ціну ${order.symbol}: ${err || 'невідома помилка'}`;
+    return rejectSignal(order, ctx, reason);
+  }
+
   // Ціни сигналу мусять бути в тому ж масштабі, що й ринок. Інакше це помилка
   // парсингу (кома як розділювач тисяч чи десятковий знак), не той символ або
   // сигнал для іншого інструмента. Зона за 50% від ринку угодою бути не може.

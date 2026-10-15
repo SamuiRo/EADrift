@@ -147,10 +147,24 @@ export function setNotifier(fn) {
 export function startMonitor(intervalMs = 5000) {
   if (intervalHandle) return;
   logger.info('Position monitor started', { intervalMs });
-  intervalHandle = setInterval(
-    () => tick().catch(err => logger.error('Monitor tick error', { err: err.message })),
-    intervalMs,
-  );
+  // Тік не повинен накладатися на попередній: якщо запит до біржі затягнувся,
+  // новий тік працював би з тим самим watchlist паралельно — подвійні часткові
+  // закриття, подвійні переноси SL.
+  let tickRunning = false;
+  intervalHandle = setInterval(async () => {
+    if (tickRunning) {
+      logger.warn('Monitor tick skipped — previous tick still running');
+      return;
+    }
+    tickRunning = true;
+    try {
+      await tick();
+    } catch (err) {
+      logger.error('Monitor tick error', { err: err.message });
+    } finally {
+      tickRunning = false;
+    }
+  }, intervalMs);
 }
 
 /** Зупинити polling */
